@@ -126,6 +126,21 @@ This document provides detailed instructions on how to use docker. To install do
 If you use this code or refer to our method in your work, please cite our paper:
 
 ```bibtex
-
+@InProceedings{OmegaRegularStochCert,
+  author="Henzinger, Thomas A.
+  and Mallik, Kaushik
+  and Sadeghi, Pouya
+  and {\v{Z}}ikeli{\'{c}}, {\DJ}or{\dj}e",
+  editor="Piskac, Ruzica
+  and Rakamari{\'{c}}, Zvonimir",
+  title="Supermartingale Certificates for Quantitative Omega-Regular Verification and Control",
+  booktitle="Computer Aided Verification",
+  year="2025",
+  publisher="Springer Nature Switzerland",
+  address="Cham",
+  pages="29--55",
+  abstract="We present the first supermartingale certificate for quantitative {\$}{\$}{\backslash}omega {\$}{\$}$\omega$-regular properties of discrete-time infinite-state stochastic systems. Our certificate is defined on the product of the stochastic system and a limit-deterministic B{\"u}chi automaton that specifies the property of interest; hence we call it a limit-deterministic B{\"u}chi supermartingale (LDBSM). Previously known supermartingale certificates applied only to quantitative reachability, safety, or reach-avoid properties, and to qualitative (i.e., probability 1) {\$}{\$}{\backslash}omega {\$}{\$}$\omega$-regular properties.We also present fully automated algorithms for the template-based synthesis of LDBSMs, for the case when the stochastic system dynamics and the controller can be represented in terms of polynomial inequalities. Our experiments demonstrate the ability of our method to solve verification and control tasks for stochastic systems that were beyond the reach of previous supermartingale-based approaches.",
+  isbn="978-3-031-98679-6"
+}
 ```
 

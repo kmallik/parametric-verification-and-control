@@ -1,42 +1,37 @@
 {
-  "actions": {
-    "maximal_polynomial_degree": 1,
-    "control_policy": [],
-    "minimum": -2,
-    "maximum": 2
-  },
-
   "disturbance": {
     "distribution_name": "uniform",
     "disturbance_parameters": {
-      "lower_bound": [0],
-      "upper_bound": [1]
+      "lower_bound": [
+        0
+      ],
+      "upper_bound": [
+        4
+      ]
     }
   },
-
   "stochastic_dynamical_system": {
     "state_space_dimension": 1,
-    "control_space_dimension": 1,
+    "control_space_dimension": 0,
     "disturbance_space_dimension": 1,
     "parameter_space_dimension": 0,
-    "system_space": ["S1 <= 150"],
-    "initial_space": ["2 <= S1 <= 3"],
+    "system_space": "S1 <= 150",
+    "initial_space": "2 <= S1 <= 3",
     "dynamics": [
       {
         "condition": "S1 <= 100",
         "transforms": [
-          "S1 + D1 + A1"
+          "S1 + D1"
         ]
       },
       {
         "condition": "100 <= S1",
         "transforms": [
-          "S1"
+          "S1 + D1"
         ]
       }
     ]
   },
-
   "synthesis_config": {
     "use_linear_invariant": true,
     "maximal_polynomial_degree": 1,
@@ -45,9 +40,7 @@
     "solver_name": "z3",
     "owl_path": "../../playground/rabinizer/owl"
   },
-
   "specification": {
-    "ltl_formula": "F a",
     "proposition_lookup": {
       "a": "100 <= S1"
     },

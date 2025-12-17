@@ -1,0 +1,13 @@
+HOA: v1
+properties: complete deterministic no-univ-branch state-acc unambiguous 
+States: 1
+Start: 0
+AP: 1 "a"
+Acceptance: 1 Inf(0)
+acc-name: Buchi
+name: "Dummy LDBA automaton accepting all words"
+tool: "owl ltl2ldba" "21.0"
+--BODY--
+State: 0 {0}
+[t] 0
+--END--

@@ -2,17 +2,17 @@
   "actions": {
     "maximal_polynomial_degree": 1,
     "control_policy": [],
-    "minimum": -2,
-    "maximum": 2
+    "minimum": 0,
+    "maximum": 0.51
   },
   "disturbance": {
     "distribution_name": "uniform",
     "disturbance_parameters": {
       "lower_bound": [
-        0
+        -1
       ],
       "upper_bound": [
-        1
+        0
       ]
     }
   },
@@ -33,7 +33,7 @@
       {
         "condition": "100 <= S1",
         "transforms": [
-          "S1"
+          "S1 + A1"
         ]
       }
     ]

@@ -26,7 +26,8 @@ class PolicyMode(Enum):
 
 class PolicyType(Enum):
     REACH = "reach"
-    BUCHI = "buchi"
+    # BUCHI = "buchi"
+    SAFE = "safe"
     UNKOWN = "unknown"
 
     @classmethod
@@ -174,8 +175,8 @@ class SystemDecomposedControlPolicy:
 
     def _initialize_synthesized_policies(self) -> None:
         logger.info("Initializing control policy for policy synthesis.")
-        prefixes = ["Pa"] + [f"Pb{i}" for i in range(self.abstraction_dimension)]
-        types = [PolicyType.REACH] + [PolicyType.BUCHI for _ in range(self.abstraction_dimension)]
+        prefixes = ["Pa"] # + [f"Pb{i}" for i in range(self.abstraction_dimension)]
+        types = [PolicyType.REACH] # + [PolicyType.BUCHI for _ in range(self.abstraction_dimension)]
         self.policies = [
             SystemControlPolicy(
                 action_dimension=self.action_dimension,
@@ -197,20 +198,20 @@ class SystemDecomposedControlPolicy:
         """Policy id is required for Buchi policies."""
         if policy_type.value == PolicyType.REACH.value:
             return self.policies[0]
-        if policy_type.value == PolicyType.BUCHI.value:
-            if policy_id is None and len(self.policies) > 2:
-                raise ValueError("Policy ID is required for Buchi policies.")
-            if policy_id is not None and (policy_id >= len(self.policies) - 1 or policy_id < 0):
-                raise ValueError(f"Invalid policy ID: {policy_id}.")
-            if policy_id is not None:
-                return self.policies[policy_id+1]
-            return self.policies[1]
+        # if policy_type.value == PolicyType.BUCHI.value:
+        #     if policy_id is None and len(self.policies) > 2:
+        #         raise ValueError("Policy ID is required for Buchi policies.")
+        #     if policy_id is not None and (policy_id >= len(self.policies) - 1 or policy_id < 0):
+        #         raise ValueError(f"Invalid policy ID: {policy_id}.")
+        #     if policy_id is not None:
+        #         return self.policies[policy_id+1]
+        #     return self.policies[1]
         raise ValueError("Policy type is not provided.")
 
     def get_length(self) -> dict[PolicyType, int]:
         return {
-            PolicyType.REACH: 1,
-            PolicyType.BUCHI: len(self.policies) - 1
+            PolicyType.REACH: 1#,
+            # PolicyType.BUCHI: len(self.policies) - 1
         }
 
     def _initialize_provided_policies(self):

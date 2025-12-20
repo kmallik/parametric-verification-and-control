@@ -12,17 +12,17 @@ from .automata.graph import Automata
 from .automata.hoaParser import HOAParser
 from .automata.synthesis import LDBASpecification
 # from .certificate.beiC import BoundedExpectedIncreaseConstraint
-from .certificate.cbC_reach import ControllerBounds
-# from .certificate.initialC import InitialSpaceConstraint
+from .certificate.cbC import ControllerBounds
+from .certificate.initialC import InitialSpaceConstraint
 from .certificate.invariant.initial_constraint import InvariantInitialConstraint
 from .certificate.invariant.inductive_constraint import InvariantInductiveConstraint
 from .certificate.invariant.template import InvariantTemplate, InvariantFakeTemplate
-from .certificate.nnC_reach import NonNegativityConstraint
-# from .certificate.safeC import SafetyConstraint
-# from .certificate.safety_condition import SafetyConditionHandler
-from .certificate.sedC_reach import StrictExpectedDecreaseConstraint
-from .certificate.template import ReachCertificateTemplates, ReachCertificateVariables
-from .certificate.variableC_reach import TemplateVariablesConstraint
+from .certificate.nnC import NonNegativityConstraint
+from .certificate.safeC import SafetyConstraint
+from .certificate.safety_condition import SafetyConditionHandler
+from .certificate.sedC import StrictExpectedDecreaseConstraint
+from .certificate.template import ReachAvoidCertificateDecomposedTemplates, ReachAvoidCertificateVariables
+from .certificate.variableC import TemplateVariablesConstraint
 from .config import SynthesisConfig
 from .dynamics import SystemDynamics
 from .noise import SystemStochasticNoise
@@ -68,7 +68,7 @@ class RunningStage(Enum):
 
 def fix_model_output(model: dict, automata: Automata):
     policy_acc = {}
-    policy_buchi = {}
+    # policy_buchi = {}
     refined_model = {}
     acc_sig = "Pa_"
 
@@ -243,11 +243,11 @@ class Runner:
 
     @stage_logger
     def _run_template_synthesis(self):
-        certificate_variables = ReachCertificateVariables(
-            probability_threshold=self.history["initiator"].synthesis_config_pre["probability_threshold"]#,
-            #delta_safe=1,
+        certificate_variables = ReachAvoidCertificateVariables(
+            probability_threshold=self.history["initiator"].synthesis_config_pre["probability_threshold"],
+            delta_safe=1,
         )
-        template = ReachCertificateTemplates(
+        template = ReachAvoidCertificateDecomposedTemplates(
             state_dimension=self.history["initiator"].sds_pre["state_dimension"],
             action_dimension=self.history["initiator"].sds_pre["action_dimension"],
             abstraction_dimension=len(self.history["ldba"].states),
@@ -261,25 +261,25 @@ class Runner:
 
     @stage_logger
     def _run_stage_generate_constraints(self):
-        # initial_space_generator = InitialSpaceConstraint(
-        #     template_manager=self.history["template"],
-        #     system_space=self.history["space"],
-        #     initial_space=self.history["initial_space"],
-        #     automata=self.history["ldba"],
-        # )
-        # initial_space_constraints = initial_space_generator.extract()
-        # print("+ Generated 'Initial Space Upper Bound Constraints' successfully.")
+        initial_space_generator = InitialSpaceConstraint(
+            template_manager=self.history["template"],
+            system_space=self.history["space"],
+            initial_space=self.history["initial_space"],
+            automata=self.history["ldba"],
+        )
+        initial_space_constraints = initial_space_generator.extract()
+        print("+ Generated 'Initial Space Upper Bound Constraints' successfully.")
         # for t in initial_space_constraints:
         #     print(f"  + {t.to_detail_string()}")
 
-        # safety_generator = SafetyConstraint(
-        #     template_manager=self.history["template"],
-        #     invariant=self.history["invariant template"],
-        #     system_space=self.history["space"],
-        #     automata=self.history["ldba"],
-        # )
-        # safety_constraints = safety_generator.extract()
-        # print("+ Generated 'Safety Constraints' successfully.")
+        safety_generator = SafetyConstraint(
+            template_manager=self.history["template"],
+            invariant=self.history["invariant template"],
+            system_space=self.history["space"],
+            automata=self.history["ldba"],
+        )
+        safety_constraints = safety_generator.extract()
+        print("+ Generated 'Safety Constraints' successfully.")
         # for t in safety_constraints:
         #     print(f"  + {t.to_detail_string()}")
 
@@ -293,12 +293,12 @@ class Runner:
         # for t in non_negativity_constraints:
         #     print(f"  + {t.to_detail_string()}")
 
-        # safety_condition_handler = SafetyConditionHandler(
-        #     template_manager=self.history["template"],
-        #     decomposed_control_policy=self.history["control policy"],
-        #     disturbance=self.history["disturbance"],
-        #     automata=self.history["ldba"],
-        # )
+        safety_condition_handler = SafetyConditionHandler(
+            template_manager=self.history["template"],
+            decomposed_control_policy=self.history["control policy"],
+            disturbance=self.history["disturbance"],
+            automata=self.history["ldba"],
+        )
 
         strict_expected_decrease_generator = StrictExpectedDecreaseConstraint(
             template_manager=self.history["template"],
@@ -307,7 +307,8 @@ class Runner:
             decomposed_control_policy=self.history["control policy"],
             disturbance=self.history["disturbance"],
             system_dynamics=self.history["sds"],
-            automata=self.history["ldba"]
+            automata=self.history["ldba"],
+            safety_condition_handler=safety_condition_handler
         )
         strict_expected_decrease_constraints = strict_expected_decrease_generator.extract()
         print("+ Generated 'Strict Expected Decrease Constraints' successfully.")
@@ -351,9 +352,9 @@ class Runner:
 
         self.history["constraints"] = {
             "template_variables": variables_constraints,
-            # "initial_space": initial_space_constraints,
+            "initial_space": initial_space_constraints,
             "non_negativity": non_negativity_constraints,
-            # "safety": safety_constraints,
+            "safety": safety_constraints,
             "strict_expected_decrease": strict_expected_decrease_constraints,
             # "bounded_expected_increase": bounded_expected_increase_constraints,
             "controller_bound": controller_bound_constraints,

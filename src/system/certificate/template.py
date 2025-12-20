@@ -164,6 +164,51 @@ class ReachAvoidCertificateVariables:
 
         self.generated_constants.update({epsilon_safe_symbol, epsilon_reach_symbol, beta_safe_symbol, eta_symbol})
 
+@dataclass
+class SafeCertificateVariables:
+    probability_threshold: float
+    delta_safe: float  # Recommended as 1
+
+    eta_safe_eq: Equation = field(init=False)
+    Beta_safe_eq: Equation = field(init=False)
+    zero_eq: Equation = field(init=False)
+    almost_zero_eq: Equation = field(init=False)
+    epsilon_safe_eq: Equation = field(init=False)
+    delta_safe_eq: Equation = field(init=False)
+    eta_epsilon_upper_bound_eq: Equation = field(init=False)
+    eta_epsilon_eq: Equation = field(init=False)
+
+    generated_constants: set[str] = field(init=False, default_factory=set)
+
+    # epsilon_reach_eq: Equation = field(init=False)
+    # delta_buchi_eq: Equation = field(init=False)
+
+
+    def __post_init__(self):
+        assert self.delta_safe > 0, "Delta for safety should be greater than 0."
+        assert 1 > self.probability_threshold >= 0, "Probability threshold should be in the range [0, 1)."
+        eta_epsilon_upper_bound_generator = 1e-15 + Pow(self.delta_safe,2)*log(1-self.probability_threshold)/8
+        eta_epsilon_upper_bound = eta_epsilon_upper_bound_generator.evalf(n=10)
+        self.eta_epsilon_upper_bound_eq = Equation.extract_equation_from_string(str(eta_epsilon_upper_bound))
+
+        self.delta_safe_eq = Equation.extract_equation_from_string(f"{self.delta_safe}")
+        self.zero_eq = Equation.extract_equation_from_string("0")
+        self.almost_zero_eq = Equation.extract_equation_from_string("1e-15")
+
+        epsilon_safe_symbol = "Epsilon_safe"
+        # epsilon_reach_symbol = "Epsilon_reach"
+        beta_safe_symbol = "Beta_safe"
+        eta_symbol = "Eta_safe"
+        # delta_buchi_symbol = "Delta_live"
+        self.epsilon_safe_eq = Equation.extract_equation_from_string(epsilon_safe_symbol)
+        # self.epsilon_reach_eq = Equation.extract_equation_from_string(epsilon_reach_symbol)
+        self.Beta_safe_eq = Equation.extract_equation_from_string(beta_safe_symbol)
+        self.eta_safe_eq = Equation.extract_equation_from_string(eta_symbol)
+        self.eta_epsilon_eq = Equation.extract_equation_from_string(f"{eta_symbol} * {epsilon_safe_symbol}")
+        # self.delta_buchi_eq = Equation.extract_equation_from_string(delta_buchi_symbol)
+
+        self.generated_constants.update({epsilon_safe_symbol, beta_safe_symbol, eta_symbol})
+
     
 @dataclass
 class ReachCertificateTemplates:
@@ -257,3 +302,42 @@ class ReachAvoidCertificateDecomposedTemplates:
         return (f"Certificate(|S|={self.state_dimension}, |A|={self.action_dimension}, |Q|={self.abstraction_dimension}, |F|={self.accepting_components_count}, |C|={len(self.generated_constants):<3}, deg={self.maximal_polynomial_degree})\n" +
                 f"\t-{self.safe_template}\n" +
                 f"\t-{self.reach_template}")
+    
+@dataclass
+class SafeCertificateTemplates:
+    state_dimension: int
+    action_dimension: int
+    abstraction_dimension: int
+    maximal_polynomial_degree: int
+    accepting_components_count: int
+    variables: SafeCertificateVariables
+    template: CertificateTemplate = field(init=False)
+    variable_generators: list[str] = field(init=False, default_factory=list)
+    generated_constants: set[str] = field(init=False, default_factory=set)
+
+
+    def __post_init__(self):
+        self.variable_generators = [f"S{i}" for i in range(1, self.state_dimension + 1)]
+        self._initialize_templates()
+        self.generated_constants.update(self.variables.generated_constants)
+
+    def _initialize_templates(self):
+        self.template = CertificateTemplate(
+            state_dimension=self.state_dimension,
+            action_dimension=self.action_dimension,
+            abstraction_dimension=self.abstraction_dimension,
+            maximal_polynomial_degree=self.maximal_polynomial_degree,
+            variable_generators=self.variable_generators,
+            template_type=CertificateTemplateType.SAFE,
+        )
+        self.generated_constants.update(self.template.get_generated_constants())
+
+    def get_generated_constants(self):
+        return self.generated_constants
+
+    def add_new_constant(self, constant: str):
+        self.generated_constants.add(constant)
+
+    def __str__(self):
+        return (f"Certificate(|S|={self.state_dimension}, |A|={self.action_dimension}, |Q|={self.abstraction_dimension}, |F|={self.accepting_components_count}, |C|={len(self.generated_constants):<3}, deg={self.maximal_polynomial_degree})\n" +
+                f"\t-{self.template}\n")

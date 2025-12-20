@@ -4,8 +4,9 @@ from tabulate import tabulate
 import os
 import json
 
-from .runner_reach_avoid import Runner
+# from .runner_reach_avoid import Runner
 # from .runner_reach import Runner
+from .runner_safe import Runner
 
 
 def dump_results_to_table(table_data, output_file="benchmark_results.txt"):

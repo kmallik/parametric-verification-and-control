@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from .constraint import ConstraintImplication, ConstraintAggregationType, SubConstraint
 from .constraintI import Constraint
 from .invariant.template import InvariantTemplate
-from .template import LTLCertificateDecomposedTemplates
+from .template import ReachAvoidCertificateDecomposedTemplates
 from ..automata.graph import Automata
 from ..polynomial.inequality import EquationConditionType, Inequality
 from ..space import SystemSpace
@@ -11,7 +11,7 @@ from ..space import SystemSpace
 
 @dataclass
 class SafetyConstraint(Constraint):
-    template_manager: LTLCertificateDecomposedTemplates
+    template_manager: ReachAvoidCertificateDecomposedTemplates
     invariant: InvariantTemplate
     system_space: SystemSpace
     automata: Automata

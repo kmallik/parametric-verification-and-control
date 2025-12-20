@@ -5,7 +5,7 @@ from .constraintI import Constraint
 from .safety_condition import SafetyConditionHandler
 from .utils import _replace_keys_with_values, get_policy_action_given_current_abstract_state
 from .invariant.template import InvariantTemplate
-from .template import LTLCertificateDecomposedTemplates
+from .template import ReachAvoidCertificateDecomposedTemplates
 from ..action import SystemDecomposedControlPolicy, PolicyType
 from ..automata.graph import Automata
 from ..automata.sub_graph import AutomataState
@@ -18,7 +18,7 @@ from ..space import SystemSpace
 
 @dataclass
 class StrictExpectedDecreaseConstraint(Constraint):
-    template_manager: LTLCertificateDecomposedTemplates
+    template_manager: ReachAvoidCertificateDecomposedTemplates
     invariant: InvariantTemplate
     system_space: SystemSpace
     decomposed_control_policy: SystemDecomposedControlPolicy
@@ -81,15 +81,15 @@ class StrictExpectedDecreaseConstraint(Constraint):
                 decomposed_control_policy=self.decomposed_control_policy
             )
             next_state_under_policy = system_dynamics(control_action)  # Dict: {state_id: StringEquation}
-            current_v_reach = self.template_manager.buchi_template.sub_templates[str(current_state.state_id)]
-            _next_v_reach = self.template_manager.buchi_template.sub_templates[str(tr.destination)]
+            current_v_reach = self.template_manager.reach_template.sub_templates[str(current_state.state_id)]
+            _next_v_reach = self.template_manager.reach_template.sub_templates[str(tr.destination)]
             _next_v_reach_state_str = _next_v_reach(**next_state_under_policy).replace(" ", "") # STRING: V_{buchi}(s', q')
 
             disturbance_expectations = self.disturbance.get_expectations()
             _expected_next_possible_v_reach_str = _replace_keys_with_values(_next_v_reach_state_str, disturbance_expectations) # STRING: E[V_{buchi}(s', q')]
             _expected_next_possible_v_reach = Equation.extract_equation_from_string(_expected_next_possible_v_reach_str) # E[V_{buchi}(s', q')]
 
-            current_v_sub_reaches_epsilon = current_v_reach.sub(self.template_manager.variables.epsilon_buchi_eq)  # V_{buchi}(s, q) - \epsilon_{buchi}
+            current_v_sub_reaches_epsilon = current_v_reach.sub(self.template_manager.variables.epsilon_reach_eq)  # V_{buchi}(s, q) - \epsilon_{buchi}
             _current_v_sub_reach_epsilon_sub_expected_next_possible_v = current_v_sub_reaches_epsilon.sub(_expected_next_possible_v_reach) # V_{buchi}(s, q) - \epsilon_{buchi} - E[V_{buchi}(s', q')]
 
             strict_expected_decrease_inequality = Inequality(

@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from .constraint import ConstraintAggregationType, GuardedInequality, SubConstraint
 from .utils import _replace_keys_with_values, get_policy_action_given_current_abstract_state
-from .template import LTLCertificateDecomposedTemplates
+from .template import ReachAvoidCertificateDecomposedTemplates
 from ..action import SystemDecomposedControlPolicy
 from ..automata.graph import Automata
 from ..automata.sub_graph import AutomataState
@@ -14,7 +14,7 @@ from ..polynomial.inequality import EquationConditionType, Inequality
 
 @dataclass
 class SafetyConditionHandler:
-    template_manager: LTLCertificateDecomposedTemplates
+    template_manager: ReachAvoidCertificateDecomposedTemplates
     decomposed_control_policy: SystemDecomposedControlPolicy
     disturbance: SystemStochasticNoise
     automata: Automata

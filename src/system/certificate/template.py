@@ -11,7 +11,7 @@ from ..utils import power_generator
 class CertificateTemplateType(Enum):
     REACH = "reach"
     SAFE = "safe"
-    LIVE = "live"
+    # LIVE = "live"
 
     def get_signature(self) -> str:
         return f"V_{self.value.lower()}"
@@ -39,8 +39,8 @@ class CertificateTemplate:
     generated_constants: set[str] = field(init=False, default_factory=set)
 
     def __post_init__(self):
-        if self.template_type in [CertificateTemplateType.LIVE] and self.instance_id is None:
-            raise ValueError(f"{self.template_type} template requires an instance_id.")
+        # if self.template_type in [CertificateTemplateType.LIVE] and self.instance_id is None:
+        #     raise ValueError(f"{self.template_type} template requires an instance_id.")
         self._initialize_templates()
 
     def _initialize_templates(self):
@@ -119,9 +119,8 @@ class ReachCertificateVariables:
         # self.generated_constants.update({epsilon_safe_symbol, epsilon_buchi_symbol, beta_safe_symbol, eta_symbol, delta_buchi_symbol})
         self.generated_constants.update({epsilon_reach_symbol})
 
-
 @dataclass
-class SafeCertificateVariables:
+class ReachAvoidCertificateVariables:
     probability_threshold: float
     delta_safe: float  # Recommended as 1
 
@@ -136,8 +135,8 @@ class SafeCertificateVariables:
 
     generated_constants: set[str] = field(init=False, default_factory=set)
 
-    epsilon_buchi_eq: Equation = field(init=False)
-    delta_buchi_eq: Equation = field(init=False)
+    epsilon_reach_eq: Equation = field(init=False)
+    # delta_buchi_eq: Equation = field(init=False)
 
 
     def __post_init__(self):
@@ -152,70 +151,19 @@ class SafeCertificateVariables:
         self.almost_zero_eq = Equation.extract_equation_from_string("1e-15")
 
         epsilon_safe_symbol = "Epsilon_safe"
-        epsilon_buchi_symbol = "Epsilon_live"
+        epsilon_reach_symbol = "Epsilon_reach"
         beta_safe_symbol = "Beta_safe"
         eta_symbol = "Eta_safe"
-        delta_buchi_symbol = "Delta_live"
+        # delta_buchi_symbol = "Delta_live"
         self.epsilon_safe_eq = Equation.extract_equation_from_string(epsilon_safe_symbol)
-        self.epsilon_buchi_eq = Equation.extract_equation_from_string(epsilon_buchi_symbol)
+        self.epsilon_reach_eq = Equation.extract_equation_from_string(epsilon_reach_symbol)
         self.Beta_safe_eq = Equation.extract_equation_from_string(beta_safe_symbol)
         self.eta_safe_eq = Equation.extract_equation_from_string(eta_symbol)
         self.eta_epsilon_eq = Equation.extract_equation_from_string(f"{eta_symbol} * {epsilon_safe_symbol}")
-        self.delta_buchi_eq = Equation.extract_equation_from_string(delta_buchi_symbol)
+        # self.delta_buchi_eq = Equation.extract_equation_from_string(delta_buchi_symbol)
 
-        self.generated_constants.update({epsilon_safe_symbol, epsilon_buchi_symbol, beta_safe_symbol, eta_symbol, delta_buchi_symbol})
+        self.generated_constants.update({epsilon_safe_symbol, epsilon_reach_symbol, beta_safe_symbol, eta_symbol})
 
-
-# @dataclass
-# class LTLCertificateDecomposedTemplates:
-#     state_dimension: int
-#     action_dimension: int
-#     abstraction_dimension: int
-#     maximal_polynomial_degree: int
-#     accepting_components_count: int
-#     variables: CertificateVariables
-#     buchi_template: CertificateTemplate = field(init=False)
-#     safe_template: CertificateTemplate = field(init=False)
-#     variable_generators: list[str] = field(init=False, default_factory=list)
-#     generated_constants: set[str] = field(init=False, default_factory=set)
-
-
-#     def __post_init__(self):
-#         self.variable_generators = [f"S{i}" for i in range(1, self.state_dimension + 1)]
-#         self._initialize_templates()
-#         self.generated_constants.update(self.variables.generated_constants)
-
-#     def _initialize_templates(self):
-#         self.buchi_template = CertificateTemplate(
-#             state_dimension=self.state_dimension,
-#             action_dimension=self.action_dimension,
-#             abstraction_dimension=self.abstraction_dimension,
-#             maximal_polynomial_degree=self.maximal_polynomial_degree,
-#             variable_generators=self.variable_generators,
-#             template_type=CertificateTemplateType.LIVE,
-#             instance_id=0
-#         )
-#         self.safe_template = CertificateTemplate(
-#             state_dimension=self.state_dimension,
-#             action_dimension=self.action_dimension,
-#             abstraction_dimension=self.abstraction_dimension,
-#             maximal_polynomial_degree=self.maximal_polynomial_degree,
-#             variable_generators=self.variable_generators,
-#             template_type=CertificateTemplateType.SAFE,
-#         )
-#         self.generated_constants.update(self.safe_template.get_generated_constants())
-#         self.generated_constants.update(self.buchi_template.get_generated_constants())
-
-#     def get_generated_constants(self):
-#         return self.generated_constants
-
-#     def add_new_constant(self, constant: str):
-#         self.generated_constants.add(constant)
-
-#     def __str__(self):
-#         return (f"Certificate(|S|={self.state_dimension}, |A|={self.action_dimension}, |Q|={self.abstraction_dimension}, |F|={self.accepting_components_count}, |C|={len(self.generated_constants):<3}, deg={self.maximal_polynomial_degree})\n" +
-#                 f"\t-{self.safe_template}\n" +
-#                 f"\t-{self.buchi_template}")
     
 @dataclass
 class ReachCertificateTemplates:
@@ -256,3 +204,56 @@ class ReachCertificateTemplates:
     def __str__(self):
         return (f"Certificate(|S|={self.state_dimension}, |A|={self.action_dimension}, |Q|={self.abstraction_dimension}, |F|={self.accepting_components_count}, |C|={len(self.generated_constants):<3}, deg={self.maximal_polynomial_degree})\n" +
                 f"\t-{self.template}\n")
+
+
+
+@dataclass
+class ReachAvoidCertificateDecomposedTemplates:
+    state_dimension: int
+    action_dimension: int
+    abstraction_dimension: int
+    maximal_polynomial_degree: int
+    accepting_components_count: int
+    variables: ReachAvoidCertificateVariables
+    reach_template: CertificateTemplate = field(init=False)
+    safe_template: CertificateTemplate = field(init=False)
+    variable_generators: list[str] = field(init=False, default_factory=list)
+    generated_constants: set[str] = field(init=False, default_factory=set)
+
+
+    def __post_init__(self):
+        self.variable_generators = [f"S{i}" for i in range(1, self.state_dimension + 1)]
+        self._initialize_templates()
+        self.generated_constants.update(self.variables.generated_constants)
+
+    def _initialize_templates(self):
+        self.reach_template = CertificateTemplate(
+            state_dimension=self.state_dimension,
+            action_dimension=self.action_dimension,
+            abstraction_dimension=self.abstraction_dimension,
+            maximal_polynomial_degree=self.maximal_polynomial_degree,
+            variable_generators=self.variable_generators,
+            template_type=CertificateTemplateType.REACH,
+            instance_id=0
+        )
+        self.safe_template = CertificateTemplate(
+            state_dimension=self.state_dimension,
+            action_dimension=self.action_dimension,
+            abstraction_dimension=self.abstraction_dimension,
+            maximal_polynomial_degree=self.maximal_polynomial_degree,
+            variable_generators=self.variable_generators,
+            template_type=CertificateTemplateType.SAFE,
+        )
+        self.generated_constants.update(self.safe_template.get_generated_constants())
+        self.generated_constants.update(self.reach_template.get_generated_constants())
+
+    def get_generated_constants(self):
+        return self.generated_constants
+
+    def add_new_constant(self, constant: str):
+        self.generated_constants.add(constant)
+
+    def __str__(self):
+        return (f"Certificate(|S|={self.state_dimension}, |A|={self.action_dimension}, |Q|={self.abstraction_dimension}, |F|={self.accepting_components_count}, |C|={len(self.generated_constants):<3}, deg={self.maximal_polynomial_degree})\n" +
+                f"\t-{self.safe_template}\n" +
+                f"\t-{self.reach_template}")

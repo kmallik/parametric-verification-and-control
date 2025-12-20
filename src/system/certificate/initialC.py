@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from .constraint import ConstraintImplication, ConstraintAggregationType, SubConstraint
 from .constraintI import Constraint
-from .template import LTLCertificateDecomposedTemplates
+from .template import ReachAvoidCertificateDecomposedTemplates
 from ..automata.graph import Automata
 from ..polynomial.inequality import EquationConditionType, Inequality
 from ..space import SystemSpace
@@ -10,7 +10,7 @@ from ..space import SystemSpace
 
 @dataclass
 class InitialSpaceConstraint(Constraint):
-    template_manager: LTLCertificateDecomposedTemplates
+    template_manager: ReachAvoidCertificateDecomposedTemplates
     system_space: SystemSpace
     initial_space: SystemSpace
     automata: Automata

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from .constraint import ConstraintImplication, ConstraintAggregationType, SubConstraint
 from .constraintI import Constraint
 from .invariant.template import InvariantTemplate
-from .template import LTLCertificateDecomposedTemplates
+from .template import ReachAvoidCertificateDecomposedTemplates
 from ..polynomial.inequality import EquationConditionType, Inequality
 from ..space import SystemSpace
 
@@ -13,7 +13,7 @@ class NonNegativityConstraint(Constraint):
     """
     forall s ∈ R → V(s,q) ≥ 0
     """
-    template_manager: LTLCertificateDecomposedTemplates
+    template_manager: ReachAvoidCertificateDecomposedTemplates
     invariant: InvariantTemplate
     system_space: SystemSpace
 
@@ -21,11 +21,11 @@ class NonNegativityConstraint(Constraint):
 
     def extract(self) -> list[ConstraintImplication]:
         constraints = []
-        self._extract_buchi(constraints=constraints)
+        self._extract(constraints=constraints)
         return constraints
 
-    def _extract_buchi(self, constraints):
-        for q_id in self.template_manager.buchi_template.sub_templates.keys():
+    def _extract(self, constraints):
+        for q_id in self.template_manager.reach_template.sub_templates.keys():
             constraints.append(
                 ConstraintImplication(
                     variables=self.template_manager.variable_generators,
@@ -36,7 +36,7 @@ class NonNegativityConstraint(Constraint):
                     ),
                     rhs=SubConstraint(
                         expr_1=Inequality(
-                            left_equation=self.template_manager.buchi_template.sub_templates[q_id],
+                            left_equation=self.template_manager.reach_template.sub_templates[q_id],
                             inequality_type=EquationConditionType.GREATER_THAN_OR_EQUAL,
                             right_equation=self.template_manager.variables.zero_eq
                         ),

@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from .constraint import ConstraintImplication, ConstraintAggregationType, SubConstraint
 from .constraintI import Constraint
-from .template import LTLCertificateDecomposedTemplates
+from .template import ReachAvoidCertificateDecomposedTemplates
 from ..action import SystemDecomposedControlPolicy
 from ..polynomial.equation import Equation
 from ..polynomial.inequality import EquationConditionType, Inequality
@@ -11,7 +11,7 @@ from ..space import SystemSpace
 
 @dataclass
 class ControllerBounds(Constraint):
-    template_manager: LTLCertificateDecomposedTemplates
+    template_manager: ReachAvoidCertificateDecomposedTemplates
     system_space: SystemSpace
     decomposed_control_policy: SystemDecomposedControlPolicy
 

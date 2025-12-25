@@ -33,7 +33,7 @@
       {
         "condition": "100 <= S1",
         "transforms": [
-          "S1 + A1"
+          "S1"
         ]
       }
     ]
@@ -49,7 +49,7 @@
   "specification": {
     "ltl_formula": "F a",
     "proposition_lookup": {
-      "a": "100 <= S1"
+      "a": "90 <= S1"
     },
     "hoa_path": "./Fa.hoa"
   }

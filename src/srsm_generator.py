@@ -355,12 +355,127 @@ class SRSMGenerator:
         return ' '.join([f"({var} Real)" for var in vars])
     
     # ============================================================================
-    # MAIN SMT GENERATION
+    # FORMULA GENERATION SUBROUTINES
     # ============================================================================
     
-    def generate_smt_file(self, config: Dict[str, Any], 
-                         output_path: str = "./tmp/temporary_polyhorn_input.smt2"):
-        """Generate the SMT2 file with entailment constraints."""
+    def generate_formula_initial_invariant(self, state_vars: List[str], state_bounds_constraint: str,
+                                          initial_constraint: str, I_expr: str) -> str:
+        """Formula 1: Initial states satisfy invariant."""
+        lhs = self.combine_constraints(state_bounds_constraint, initial_constraint)
+        return f"(forall ({self.format_var_decls(state_vars)}) (=> {lhs} (>= {I_expr} 0)))"
+    
+    def generate_formulas_invariant_preservation(self, state_vars: List[str], noise_vars: List[str],
+                                                 state_bounds_constraint: str, noise_bounds_constraint: str,
+                                                 I_expr: str, next_state_exprs: Any) -> List[str]:
+        """Formula 2: Invariant is preserved."""
+        formulas = []
+        
+        if isinstance(next_state_exprs, dict):
+            I_next = self.substitute_vars(I_expr, next_state_exprs)
+            all_vars = state_vars + noise_vars
+            lhs = self.combine_constraints(state_bounds_constraint, noise_bounds_constraint, f"(>= {I_expr} 0)")
+            formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
+            formulas.append(formula)
+        else:
+            for piece in next_state_exprs:
+                condition = piece['condition']
+                transforms = piece['transforms']
+                I_next = self.substitute_vars(I_expr, transforms)
+                
+                all_vars = state_vars + noise_vars
+                lhs = self.combine_constraints(state_bounds_constraint, noise_bounds_constraint, 
+                                              condition, f"(>= {I_expr} 0)")
+                formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
+                formulas.append(formula)
+        
+        return formulas
+    
+    def generate_formula_v_nonnegative(self, state_vars: List[str], state_bounds_constraint: str,
+                                      I_expr: str, V_expr: str) -> str:
+        """Formula 3: V is non-negative on invariant."""
+        lhs = self.combine_constraints(state_bounds_constraint, f"(>= {I_expr} 0)")
+        return f"(forall ({self.format_var_decls(state_vars)}) (=> {lhs} (>= {V_expr} 0)))"
+    
+    def generate_formula_epsilon_positive(self, epsilon: str) -> str:
+        """Formula 4: Epsilon is positive."""
+        min_float = "1.0e-15"
+        return f"(>= (+ (* 1 {epsilon}) (* -1 {min_float})) 0)"
+    
+    def generate_formulas_expected_decrease(self, state_vars: List[str], noise_vars: List[str],
+                                           state_bounds_constraint: str, target_bounds: List[Tuple[float, float]],
+                                           I_expr: str, V_expr: str, epsilon: str,
+                                           next_state_exprs: Any, noise_distribution: Dict[str, Any],
+                                           v_upper_bound: str = None) -> List[str]:
+        """Formula 5: Expected decrease outside target (with optional V upper bound)."""
+        formulas = []
+        
+        if isinstance(next_state_exprs, dict):
+            V_next = self.substitute_vars(V_expr, next_state_exprs)
+            
+            if noise_vars:
+                E_V_next = self.compute_expected_value(V_next, noise_vars, noise_distribution)
+            else:
+                E_V_next = V_next
+            
+            decrease = f"(- {V_expr} {E_V_next})"
+            
+            not_target_cases = self.negate_cartesian_bounds(target_bounds, state_vars)
+            for not_target_constraint in not_target_cases:
+                if not self.is_satisfiable_combination(state_bounds_constraint, not_target_constraint):
+                    continue
+                
+                # Build LHS with optional V upper bound constraint
+                lhs_constraints = [state_bounds_constraint, not_target_constraint, f"(>= {I_expr} 0)"]
+                if v_upper_bound:
+                    lhs_constraints.append(f"(<= {V_expr} {v_upper_bound})")
+                
+                lhs = self.combine_constraints(*lhs_constraints)
+                formula = f"(forall ({self.format_var_decls(state_vars)}) (=> {lhs} (>= {decrease} {epsilon})))"
+                formulas.append(formula)
+        else:
+            for piece in next_state_exprs:
+                condition = piece['condition']
+                transforms = piece['transforms']
+                V_next = self.substitute_vars(V_expr, transforms)
+                
+                if noise_vars:
+                    E_V_next = self.compute_expected_value(V_next, noise_vars, noise_distribution)
+                else:
+                    E_V_next = V_next
+                
+                decrease = f"(- {V_expr} {E_V_next})"
+                
+                not_target_cases = self.negate_cartesian_bounds(target_bounds, state_vars)
+                
+                for not_target_constraint in not_target_cases:
+                    if not self.is_satisfiable_combination(state_bounds_constraint, condition, not_target_constraint):
+                        continue
+                    
+                    # Build LHS with optional V upper bound constraint
+                    lhs_constraints = [state_bounds_constraint, condition, not_target_constraint, f"(>= {I_expr} 0)"]
+                    if v_upper_bound:
+                        lhs_constraints.append(f"(<= {V_expr} {v_upper_bound})")
+                    
+                    lhs = self.combine_constraints(*lhs_constraints)
+                    formula = f"(forall ({self.format_var_decls(state_vars)}) (=> {lhs} (>= {decrease} {epsilon})))"
+                    formulas.append(formula)
+        
+        return formulas
+    
+    def generate_formula_initial_value_bound(self, state_vars: List[str], state_bounds_constraint: str,
+                                            initial_constraint: str, I_expr: str, V_expr: str,
+                                            upper_bound: str) -> str:
+        """Formula 6: Initial value of V is bounded."""
+        lhs = self.combine_constraints(state_bounds_constraint, f"(>= {I_expr} 0)", initial_constraint)
+        return f"(forall ({self.format_var_decls(state_vars)}) (=> {lhs} (<= {V_expr} {upper_bound})))"
+    
+    # ============================================================================
+    # MAIN SMT GENERATION FUNCTIONS
+    # ============================================================================
+    
+    def generate_smt_file_almost_sure_reach(self, config: Dict[str, Any], 
+                                            output_path: str = "./tmp/temporary_polyhorn_input.smt2"):
+        """Generate SMT2 file for almost-sure reachability (probability = 1)."""
         
         system_type = config['system']['type']
         self.system_type = system_type
@@ -384,92 +499,118 @@ class SRSMGenerator:
         # Get bounds constraints
         state_bounds_constraint = self.parse_cartesian_bounds(state_bounds, state_vars) if state_bounds else None
         noise_bounds_constraint = self.get_noise_bounds(noise_vars, noise_distribution)
+        initial_constraint = self.parse_region(initial_region, state_vars)
+        target_bounds = target_region['bounds']
         
+        # Generate dynamics
+        next_state_exprs = self.generate_dynamics_expression(dynamics, state_vars, C_expr, noise_vars)
+        
+        # Generate formulas
         formulas = []
         
         # Formula 1: Initial states satisfy invariant
-        initial_constraint = self.parse_region(initial_region, state_vars)
-        lhs1 = self.combine_constraints(state_bounds_constraint, initial_constraint)
-        formula1 = f"(forall ({self.format_var_decls(state_vars)}) (=> {lhs1} (>= {I_expr} 0)))"
-        formulas.append(formula1)
+        formulas.append(self.generate_formula_initial_invariant(
+            state_vars, state_bounds_constraint, initial_constraint, I_expr))
         
         # Formula 2: Invariant is preserved
-        next_state_exprs = self.generate_dynamics_expression(dynamics, state_vars, C_expr, noise_vars)
-        
-        if isinstance(next_state_exprs, dict):
-            I_next = self.substitute_vars(I_expr, next_state_exprs)
-            all_vars = state_vars + noise_vars
-            lhs2 = self.combine_constraints(state_bounds_constraint, noise_bounds_constraint, f"(>= {I_expr} 0)")
-            formula2 = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs2} (>= {I_next} 0)))"
-            formulas.append(formula2)
-        else:
-            for piece in next_state_exprs:
-                condition = piece['condition']
-                transforms = piece['transforms']
-                I_next = self.substitute_vars(I_expr, transforms)
-                
-                all_vars = state_vars + noise_vars
-                lhs2 = self.combine_constraints(state_bounds_constraint, noise_bounds_constraint, 
-                                               condition, f"(>= {I_expr} 0)")
-                formula2 = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs2} (>= {I_next} 0)))"
-                formulas.append(formula2)
+        formulas.extend(self.generate_formulas_invariant_preservation(
+            state_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint, I_expr, next_state_exprs))
         
         # Formula 3: V is non-negative on invariant
-        lhs3 = self.combine_constraints(state_bounds_constraint, f"(>= {I_expr} 0)")
-        formula3 = f"(forall ({self.format_var_decls(state_vars)}) (=> {lhs3} (>= {V_expr} 0)))"
-        formulas.append(formula3)
+        formulas.append(self.generate_formula_v_nonnegative(
+            state_vars, state_bounds_constraint, I_expr, V_expr))
         
         # Formula 4: Epsilon is positive
-        min_float = "1.0e-15"
-        formula4 = f"(>= (+ (* 1 {epsilon}) (* -1 {min_float})) 0)"
-        formulas.append(formula4)
+        formulas.append(self.generate_formula_epsilon_positive(epsilon))
         
-        # Formula 5: Expected decrease (only outside target)
-        target_bounds = target_region['bounds']
-        
-        if isinstance(next_state_exprs, dict):
-            V_next = self.substitute_vars(V_expr, next_state_exprs)
-            
-            if noise_vars:
-                E_V_next = self.compute_expected_value(V_next, noise_vars, noise_distribution)
-            else:
-                E_V_next = V_next
-            
-            decrease = f"(- {V_expr} {E_V_next})"
-            
-            not_target_cases = self.negate_cartesian_bounds(target_bounds, state_vars)
-            for not_target_constraint in not_target_cases:
-                if not self.is_satisfiable_combination(state_bounds_constraint, not_target_constraint):
-                    continue
-                
-                lhs5 = self.combine_constraints(state_bounds_constraint, not_target_constraint, f"(>= {I_expr} 0)")
-                formula5 = f"(forall ({self.format_var_decls(state_vars)}) (=> {lhs5} (>= {decrease} {epsilon})))"
-                formulas.append(formula5)
-        else:
-            for piece in next_state_exprs:
-                condition = piece['condition']
-                transforms = piece['transforms']
-                V_next = self.substitute_vars(V_expr, transforms)
-                
-                if noise_vars:
-                    E_V_next = self.compute_expected_value(V_next, noise_vars, noise_distribution)
-                else:
-                    E_V_next = V_next
-                
-                decrease = f"(- {V_expr} {E_V_next})"
-                
-                not_target_cases = self.negate_cartesian_bounds(target_bounds, state_vars)
-                
-                for not_target_constraint in not_target_cases:
-                    if not self.is_satisfiable_combination(state_bounds_constraint, condition, not_target_constraint):
-                        continue
-                    
-                    lhs5 = self.combine_constraints(state_bounds_constraint, condition, 
-                                                   not_target_constraint, f"(>= {I_expr} 0)")
-                    formula5 = f"(forall ({self.format_var_decls(state_vars)}) (=> {lhs5} (>= {decrease} {epsilon})))"
-                    formulas.append(formula5)
+        # Formula 5: Expected decrease (no V upper bound for almost-sure)
+        formulas.extend(self.generate_formulas_expected_decrease(
+            state_vars, noise_vars, state_bounds_constraint, target_bounds,
+            I_expr, V_expr, epsilon, next_state_exprs, noise_distribution, v_upper_bound=None))
         
         # Write SMT2 file
+        self._write_smt_file(output_path, formulas)
+        
+        print(f"Generated SMT2 file (almost-sure reachability): {output_path}")
+        return output_path
+    
+    def generate_smt_file_quantitative_reach(self, config: Dict[str, Any], 
+                                             output_path: str = "./tmp/temporary_polyhorn_input.smt2"):
+        """Generate SMT2 file for quantitative reachability (probability < 1)."""
+        
+        system_type = config['system']['type']
+        self.system_type = system_type
+        
+        degree = config['degree']
+        state_vars = config['system']['state_vars']
+        noise_vars = config['system'].get('noise_vars', [])
+        state_bounds = config['system'].get('state_bounds', [])
+        target_probability = config.get('target_probability', 1.0)
+        
+        if target_probability <= 0 or target_probability > 1:
+            raise ValueError("target_probability must be in (0, 1]")
+        
+        initial_region = config['system']['initial_region']
+        target_region = config['target_region']
+        dynamics = config['system']['dynamics']
+        noise_distribution = config['system'].get('noise_distribution', {})
+        
+        # Generate polynomial templates
+        V_expr = self.generate_polynomial_template(state_vars, degree, "V")
+        I_expr = self.generate_polynomial_template(state_vars, degree, "I")
+        C_expr = self.generate_polynomial_template(state_vars, degree, "C")
+        epsilon = self.new_constant("Epsilon")
+        
+        # Get bounds constraints
+        state_bounds_constraint = self.parse_cartesian_bounds(state_bounds, state_vars) if state_bounds else None
+        noise_bounds_constraint = self.get_noise_bounds(noise_vars, noise_distribution)
+        initial_constraint = self.parse_region(initial_region, state_vars)
+        target_bounds = target_region['bounds']
+        
+        # Calculate V upper bound: 1 / (1 - p)
+        if target_probability < 1.0:
+            v_upper_bound = str(1.0 / (1.0 - target_probability))
+        else:
+            v_upper_bound = None
+        
+        # Generate dynamics
+        next_state_exprs = self.generate_dynamics_expression(dynamics, state_vars, C_expr, noise_vars)
+        
+        # Generate formulas
+        formulas = []
+        
+        # Formula 1: Initial states satisfy invariant
+        formulas.append(self.generate_formula_initial_invariant(
+            state_vars, state_bounds_constraint, initial_constraint, I_expr))
+        
+        # Formula 2: Invariant is preserved
+        formulas.extend(self.generate_formulas_invariant_preservation(
+            state_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint, I_expr, next_state_exprs))
+        
+        # Formula 3: V is non-negative on invariant
+        formulas.append(self.generate_formula_v_nonnegative(
+            state_vars, state_bounds_constraint, I_expr, V_expr))
+        
+        # Formula 4: Epsilon is positive
+        formulas.append(self.generate_formula_epsilon_positive(epsilon))
+        
+        # Formula 5: Expected decrease with V upper bound
+        formulas.extend(self.generate_formulas_expected_decrease(
+            state_vars, noise_vars, state_bounds_constraint, target_bounds,
+            I_expr, V_expr, epsilon, next_state_exprs, noise_distribution, v_upper_bound=v_upper_bound))
+        
+        # Formula 6: Initial value bound
+        formulas.append(self.generate_formula_initial_value_bound(
+            state_vars, state_bounds_constraint, initial_constraint, I_expr, V_expr, "1"))
+        
+        # Write SMT2 file
+        self._write_smt_file(output_path, formulas)
+        
+        print(f"Generated SMT2 file (quantitative reachability, p={target_probability}): {output_path}")
+        return output_path
+    
+    def _write_smt_file(self, output_path: str, formulas: List[str]):
+        """Helper to write formulas to SMT2 file."""
         with open(output_path, 'w') as f:
             for const in self.constants:
                 f.write(f"(declare-const {const} Real)\n")
@@ -481,9 +622,6 @@ class SRSMGenerator:
             
             f.write("(check-sat)\n")
             f.write("(get-model)\n")
-        
-        print(f"Generated SMT2 file: {output_path}")
-        return output_path
     
     def generate_config_file(self, theorem_name: str, degree: int, solver_name: str,
                            smt_output_path: str = "./tmp/temporary_polyhorn_input.smt2"):
@@ -527,9 +665,18 @@ def main():
     smt_solver = config['smt_solver']
     entailment_solver = config['entailment_solver']
     output_path = config.get('output_smt_path', './tmp/temporary_polyhorn_input.smt2')
+    target_probability = config.get('target_probability', 1.0)
     
     generator = SRSMGenerator()
-    generator.generate_smt_file(config, output_path)
+    
+    # Choose appropriate generation method based on target_probability
+    if target_probability >= 1.0:
+        print("Generating SMT file for almost-sure reachability...")
+        generator.generate_smt_file_almost_sure_reach(config, output_path)
+    else:
+        print(f"Generating SMT file for quantitative reachability (p={target_probability})...")
+        generator.generate_smt_file_quantitative_reach(config, output_path)
+    
     generator.generate_config_file(entailment_solver, degree, smt_solver, output_path)
     
     print("\nGeneration complete!")

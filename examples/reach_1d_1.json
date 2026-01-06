@@ -29,6 +29,7 @@
   "target_region": {
     "bounds": [[90, 150]]
   },
+  "target_probability": 0.95,
   "degree": 1,
   "smt_solver": "z3",
   "entailment_solver": "farkas",

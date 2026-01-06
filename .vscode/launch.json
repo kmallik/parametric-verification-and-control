@@ -1,0 +1,13 @@
+{
+    "configurations": [
+        {
+            "name": "Python Debugger: Python File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/runner_check.py",
+            // "program": "${workspaceFolder}/src/smt_formula_make_readable.py",
+            // "args": ["${workspaceFolder}/src/benchmark/temp/temporary_polyhorn_input.smt2",
+            //         "${workspaceFolder}/src/benchmark/temp/polyhorn_input_readable.txt"]
+        }
+    ]
+}

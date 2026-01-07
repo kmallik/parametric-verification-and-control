@@ -27,6 +27,7 @@ class SRSMGenerator:
         Generate a polynomial template of given degree with unknown coefficients.
         For variables [x], degree 1: c1 + c2*x
         For variables [x], degree 2: c1 + c2*x + c3*x*x
+        All operators are binary (exactly 2 arguments).
         """
         if degree == 0:
             return self.new_constant(prefix)
@@ -53,12 +54,23 @@ class SRSMGenerator:
                             var_prod = f"(* {var_prod} {v})"
                         terms.append(f"(* {coeff} {var_prod})")
         
+        # Build sum with binary + operators
+        return self.build_binary_addition(terms)
+    
+    def build_binary_addition(self, terms: List[str]) -> str:
+        """Build addition with binary + operators: (+ a (+ b c))."""
         if len(terms) == 0:
             return "0"
         elif len(terms) == 1:
             return terms[0]
+        elif len(terms) == 2:
+            return f"(+ {terms[0]} {terms[1]})"
         else:
-            return f"(+ {' '.join(terms)})"
+            # Nest from right: a + b + c + d = (+ a (+ b (+ c d)))
+            result = f"(+ {terms[-2]} {terms[-1]})"
+            for i in range(len(terms) - 3, -1, -1):
+                result = f"(+ {terms[i]} {result})"
+            return result
     
     def generate_power_combinations(self, num_vars: int, total_degree: int) -> List[List[int]]:
         """Generate all combinations of powers that sum to total_degree."""
@@ -289,8 +301,11 @@ class SRSMGenerator:
         return re.sub(r'\(\*\s+(\w+)\)', r'(* 1 \1)', expr)
     
     def generate_dynamics_expression(self, dynamics: Any, state_vars: List[str],
-                                    control_expr: str, noise_vars: List[str]) -> Any:
-        """Generate expressions for next state variables."""
+                                    control_vars: List[str], noise_vars: List[str]) -> Any:
+        """
+        Generate expressions for next state variables.
+        If control_vars is provided, they will be substituted with controller expressions later.
+        """
         if isinstance(dynamics, dict) and 'expressions' in dynamics:
             exprs = dynamics['expressions']
             fixed_exprs = {}
@@ -317,6 +332,19 @@ class SRSMGenerator:
         else:
             raise ValueError("Dynamics must specify 'expressions' or be a list")
     
+    def substitute_control(self, expr: str, control_vars: List[str], controller_exprs: Dict[str, str]) -> str:
+        """Substitute control variables with controller expressions."""
+        result = expr
+        for control_var in control_vars:
+            if control_var in controller_exprs:
+                controller = controller_exprs[control_var]
+                # Replace control variable with controller expression
+                # Use word boundaries to ensure we match the whole variable name
+                import re
+                pattern = r'\b' + re.escape(control_var) + r'\b'
+                result = re.sub(pattern, controller, result)
+        return result
+    
     def compute_expected_value(self, expr: str, noise_vars: List[str], 
                               noise_dist: Dict[str, Any]) -> str:
         """Compute expected value by replacing noise with means."""
@@ -341,18 +369,77 @@ class SRSMGenerator:
             raise ValueError(f"Unsupported distribution type: {dist_type}")
     
     def substitute_vars(self, expr: str, var_map: Dict[str, str]) -> str:
-        """Substitute variables in expression."""
+        """Substitute variables in expression, ensuring proper parentheses."""
+        import re
         result = expr
         for var, new_expr in var_map.items():
-            if new_expr.startswith('('):
-                result = result.replace(var, new_expr)
-            else:
-                result = result.replace(var, f"({new_expr})")
+            # Use word boundaries to match whole variable names
+            pattern = r'\b' + re.escape(var) + r'\b'
+            # The new_expr should already have proper parentheses from dynamics
+            result = re.sub(pattern, new_expr, result)
         return result
+    
+    def validate_affine_disturbance(self, dynamics: Any, noise_vars: List[str]):
+        """
+        Validate that disturbance appears in affine form: Si = g(Si, Uj) + Wi.
+        This is a simplified check - looks for patterns like (+ expr Wi).
+        """
+        if not noise_vars:
+            return True
+        
+        def check_transform(transform_expr: str) -> bool:
+            """Check if expression has form g(...) + Wi."""
+            for noise_var in noise_vars:
+                # Pattern: should have (+ ... noise_var) or (+ noise_var ...)
+                if noise_var in transform_expr:
+                    # Check it's not multiplied or in other non-affine forms
+                    if f'(* {noise_var}' in transform_expr or f'* {noise_var})' in transform_expr:
+                        return False
+                    if f'(/ {noise_var}' in transform_expr or f'/ {noise_var})' in transform_expr:
+                        return False
+            return True
+        
+        if isinstance(dynamics, dict) and 'expressions' in dynamics:
+            for var, expr in dynamics['expressions'].items():
+                if not check_transform(expr):
+                    raise ValueError(f"Disturbance must appear in affine form: {var} = g(...) + W. Got: {expr}")
+        elif isinstance(dynamics, list):
+            for piece in dynamics:
+                transforms = piece.get('transforms', piece.get('expressions', {}))
+                for var, expr in transforms.items():
+                    if not check_transform(expr):
+                        raise ValueError(f"Disturbance must appear in affine form: {var} = g(...) + W. Got: {expr}")
+        
+        return True
     
     def format_var_decls(self, vars: List[str]) -> str:
         """Format variable declarations."""
         return ' '.join([f"({var} Real)" for var in vars])
+    
+    def validate_config(self, config: Dict[str, Any]):
+        """Validate configuration for safety/reachability requirements."""
+        has_target = 'target_region' in config
+        has_unsafe = 'unsafe_region' in config
+        
+        if has_target and has_unsafe:
+            raise ValueError("Cannot specify both 'target_region' and 'unsafe_region'. Use one or the other.")
+        
+        if not has_target and not has_unsafe:
+            raise ValueError("Must specify either 'target_region' (for reachability) or 'unsafe_region' (for safety).")
+        
+        # For safety, target_probability is required
+        if has_unsafe and 'target_probability' not in config:
+            raise ValueError("For safety specifications, 'target_probability' is required.")
+        
+        # If control_vars are specified, control_bounds must be provided
+        control_vars = config['system'].get('control_vars', [])
+        if control_vars:
+            if 'control_bounds' not in config['system']:
+                raise ValueError("When 'control_vars' are specified, 'control_bounds' must be provided.")
+            
+            control_bounds = config['system']['control_bounds']
+            if len(control_bounds) != len(control_vars):
+                raise ValueError(f"Number of control_bounds ({len(control_bounds)}) must match number of control_vars ({len(control_vars)}).")
     
     # ============================================================================
     # FORMULA GENERATION SUBROUTINES
@@ -400,6 +487,11 @@ class SRSMGenerator:
         """Formula 4: Epsilon is positive."""
         min_float = "1.0e-15"
         return f"(>= (+ (* 1 {epsilon}) (* -1 {min_float})) 0)"
+    
+    def generate_formula_M_positive(self, M: str) -> str:
+        """M is positive (for safety)."""
+        min_float = "1.0e-15"
+        return f"(>= (+ (* 1 {M}) (* -1 {min_float})) 0)"
     
     def generate_formulas_expected_decrease(self, state_vars: List[str], noise_vars: List[str],
                                            state_bounds_constraint: str, target_bounds: List[Tuple[float, float]],
@@ -465,9 +557,185 @@ class SRSMGenerator:
     def generate_formula_initial_value_bound(self, state_vars: List[str], state_bounds_constraint: str,
                                             initial_constraint: str, I_expr: str, V_expr: str,
                                             upper_bound: str) -> str:
-        """Formula 6: Initial value of V is bounded."""
+        """Formula 6 (reachability): Initial value of V is bounded."""
         lhs = self.combine_constraints(state_bounds_constraint, f"(>= {I_expr} 0)", initial_constraint)
         return f"(forall ({self.format_var_decls(state_vars)}) (=> {lhs} (<= {V_expr} {upper_bound})))"
+    
+    # ============================================================================
+    # SAFETY-SPECIFIC FORMULA GENERATION
+    # ============================================================================
+    
+    def generate_formula_initial_eta_bound(self, state_vars: List[str], state_bounds_constraint: str,
+                                          initial_constraint: str, V_expr: str, eta: str) -> str:
+        """Formula 3 (safety): Initial states have V <= Eta."""
+        lhs = self.combine_constraints(state_bounds_constraint, initial_constraint)
+        return f"(forall ({self.format_var_decls(state_vars)}) (=> {lhs} (<= {V_expr} {eta})))"
+    
+    def generate_formula_eta_nonpositive(self, eta: str) -> str:
+        """Formula 4 (safety): Eta <= 0."""
+        return f"(<= {eta} 0)"
+    
+    def generate_formula_unsafe_region_positive(self, state_vars: List[str], state_bounds_constraint: str,
+                                               unsafe_constraint: str, I_expr: str, V_expr: str) -> str:
+        """Formula 5 (safety): V >= 0 in unsafe region."""
+        lhs = self.combine_constraints(state_bounds_constraint, f"(>= {I_expr} 0)", unsafe_constraint)
+        return f"(forall ({self.format_var_decls(state_vars)}) (=> {lhs} (>= {V_expr} 0)))"
+    
+    def generate_formulas_safety_decrease(self, state_vars: List[str], noise_vars: List[str],
+                                         state_bounds_constraint: str, I_expr: str, V_expr: str,
+                                         epsilon: str, beta: str, M: str,
+                                         next_state_exprs: Any, noise_distribution: Dict[str, Any],
+                                         controller_exprs: Dict[str, str]) -> List[str]:
+        """Formula 6 (safety): Expected decrease and bounds with extreme disturbances."""
+        formulas = []
+        
+        # Get noise bounds for w_min and w_max
+        if not noise_vars or 'params' not in noise_distribution:
+            raise ValueError("Safety requires noise variables with defined bounds")
+        
+        dist_type = noise_distribution.get('type', 'uniform')
+        if dist_type == 'uniform':
+            lower_bounds = noise_distribution['params']['lower']
+            upper_bounds = noise_distribution['params']['upper']
+        else:
+            raise ValueError("Safety currently only supports uniform noise distribution")
+        
+        if isinstance(next_state_exprs, dict):
+            # Simple dynamics
+            V_next_expected = self.substitute_vars(V_expr, next_state_exprs)
+            V_next_expected = self.substitute_control(V_next_expected, 
+                                                     list(controller_exprs.keys()), 
+                                                     controller_exprs)
+            E_V_next = self.compute_expected_value(V_next_expected, noise_vars, noise_distribution)
+            
+            # V with w_min
+            V_next_min = V_next_expected
+            for i, noise_var in enumerate(noise_vars):
+                V_next_min = V_next_min.replace(noise_var, str(lower_bounds[i]))
+            
+            # V with w_max
+            V_next_max = V_next_expected
+            for i, noise_var in enumerate(noise_vars):
+                V_next_max = V_next_max.replace(noise_var, str(upper_bounds[i]))
+            
+            # Expected decrease >= Epsilon
+            decrease_expected = f"(- {V_expr} {E_V_next})"
+            
+            # Beta <= V(x) - V(f(x,C(x),w_min)) <= Beta + M
+            decrease_min = f"(- {V_expr} {V_next_min})"
+            
+            # Beta <= V(x) - V(f(x,C(x),w_max)) <= Beta + M
+            decrease_max = f"(- {V_expr} {V_next_max})"
+            
+            lhs = self.combine_constraints(state_bounds_constraint, f"(>= {I_expr} 0)", f"(<= {V_expr} 0)")
+            
+            # Build RHS with binary and operators
+            conditions = [
+                f"(>= {decrease_expected} {epsilon})",
+                f"(>= {decrease_min} {beta})",
+                f"(<= {decrease_min} (+ {beta} {M}))",
+                f"(>= {decrease_max} {beta})",
+                f"(<= {decrease_max} (+ {beta} {M}))"
+            ]
+            
+            # Build nested and structure
+            rhs = conditions[-1]
+            for i in range(len(conditions) - 2, -1, -1):
+                rhs = f"(and {conditions[i]} {rhs})"
+            
+            formula = (f"(forall ({self.format_var_decls(state_vars)}) "
+                      f"(=> {lhs} {rhs}))")
+            formulas.append(formula)
+        else:
+            # Piecewise dynamics
+            for piece in next_state_exprs:
+                condition = piece['condition']
+                transforms = piece['transforms']
+                
+                V_next_expected = self.substitute_vars(V_expr, transforms)
+                V_next_expected = self.substitute_control(V_next_expected, 
+                                                         list(controller_exprs.keys()), 
+                                                         controller_exprs)
+                E_V_next = self.compute_expected_value(V_next_expected, noise_vars, noise_distribution)
+                
+                # V with w_min
+                V_next_min = V_next_expected
+                for i, noise_var in enumerate(noise_vars):
+                    V_next_min = V_next_min.replace(noise_var, str(lower_bounds[i]))
+                
+                # V with w_max
+                V_next_max = V_next_expected
+                for i, noise_var in enumerate(noise_vars):
+                    V_next_max = V_next_max.replace(noise_var, str(upper_bounds[i]))
+                
+                decrease_expected = f"(- {V_expr} {E_V_next})"
+                decrease_min = f"(- {V_expr} {V_next_min})"
+                decrease_max = f"(- {V_expr} {V_next_max})"
+                
+                lhs = self.combine_constraints(state_bounds_constraint, condition, 
+                                              f"(>= {I_expr} 0)", f"(<= {V_expr} 0)")
+                
+                # Build RHS with binary and operators
+                conditions = [
+                    f"(>= {decrease_expected} {epsilon})",
+                    f"(>= {decrease_min} {beta})",
+                    f"(<= {decrease_min} (+ {beta} {M}))",
+                    f"(>= {decrease_max} {beta})",
+                    f"(<= {decrease_max} (+ {beta} {M}))"
+                ]
+                
+                # Build nested and structure
+                rhs = conditions[-1]
+                for i in range(len(conditions) - 2, -1, -1):
+                    rhs = f"(and {conditions[i]} {rhs})"
+                
+                formula = (f"(forall ({self.format_var_decls(state_vars)}) "
+                          f"(=> {lhs} {rhs}))")
+                formulas.append(formula)
+        
+        return formulas
+    
+    def generate_formula_probability_bound(self, target_probability: float, epsilon: str, 
+                                          eta: str, M: str) -> str:
+        """Formula 7 (safety): p <= 1 - exp(8*Epsilon*Eta/M^2)."""
+        # p <= 1 - exp(8*Epsilon*Eta/M^2)
+        # Rewrite as: exp(8*Epsilon*Eta/M^2) <= 1 - p
+        # Take log: 8*Epsilon*Eta/M^2 <= log(1 - p)
+        import math
+        if target_probability >= 1.0:
+            raise ValueError("For safety, target_probability must be < 1.0")
+        
+        log_value = math.log(1.0 - target_probability)
+        
+        # 8*Epsilon*Eta/M^2 <= log(1-p)
+        # Multiply both sides by M^2: 8*Epsilon*Eta <= M^2 * log(1-p)
+        # This is: (* 8 (* Epsilon Eta)) <= (* (* M M) log_value)
+        
+        return (f"(<= (* 8 (* {epsilon} {eta})) "
+                f"(* (* {M} {M}) {log_value}))")
+    
+    def generate_formulas_control_bounds(self, state_vars: List[str], state_bounds_constraint: str,
+                                        I_expr: str, control_vars: List[str], 
+                                        controller_exprs: Dict[str, str],
+                                        control_bounds: List[Tuple[float, float]]) -> List[str]:
+        """Generate formulas ensuring controller respects control bounds within invariant."""
+        formulas = []
+        
+        for i, control_var in enumerate(control_vars):
+            if control_var not in controller_exprs:
+                continue
+            
+            controller = controller_exprs[control_var]
+            u_min, u_max = control_bounds[i]
+            
+            # Formula: ∀x. (state_bounds ∧ I(x) >= 0) → (U_min <= C(x) <= U_max)
+            lhs = self.combine_constraints(state_bounds_constraint, f"(>= {I_expr} 0)")
+            rhs = f"(and (>= {controller} {u_min}) (<= {controller} {u_max}))"
+            
+            formula = f"(forall ({self.format_var_decls(state_vars)}) (=> {lhs} {rhs}))"
+            formulas.append(formula)
+        
+        return formulas
     
     # ============================================================================
     # MAIN SMT GENERATION FUNCTIONS
@@ -477,12 +745,15 @@ class SRSMGenerator:
                                             output_path: str = "./tmp/temporary_polyhorn_input.smt2"):
         """Generate SMT2 file for almost-sure reachability (probability = 1)."""
         
+        self.validate_config(config)
+        
         system_type = config['system']['type']
         self.system_type = system_type
         
         degree = config['degree']
         state_vars = config['system']['state_vars']
         noise_vars = config['system'].get('noise_vars', [])
+        control_vars = config['system'].get('control_vars', [])
         state_bounds = config['system'].get('state_bounds', [])
         
         initial_region = config['system']['initial_region']
@@ -493,7 +764,13 @@ class SRSMGenerator:
         # Generate polynomial templates
         V_expr = self.generate_polynomial_template(state_vars, degree, "V")
         I_expr = self.generate_polynomial_template(state_vars, degree, "I")
-        C_expr = self.generate_polynomial_template(state_vars, degree, "C")
+        
+        # Generate controller templates if control variables exist
+        controller_exprs = {}
+        if control_vars:
+            for control_var in control_vars:
+                controller_exprs[control_var] = self.generate_polynomial_template(state_vars, degree, "C")
+        
         epsilon = self.new_constant("Epsilon")
         
         # Get bounds constraints
@@ -503,32 +780,45 @@ class SRSMGenerator:
         target_bounds = target_region['bounds']
         
         # Generate dynamics
-        next_state_exprs = self.generate_dynamics_expression(dynamics, state_vars, C_expr, noise_vars)
+        next_state_exprs = self.generate_dynamics_expression(dynamics, state_vars, control_vars, noise_vars)
+        
+        # Substitute controllers into dynamics
+        if control_vars:
+            if isinstance(next_state_exprs, dict):
+                for var in next_state_exprs:
+                    next_state_exprs[var] = self.substitute_control(next_state_exprs[var], 
+                                                                    control_vars, controller_exprs)
+            else:
+                for piece in next_state_exprs:
+                    for var in piece['transforms']:
+                        piece['transforms'][var] = self.substitute_control(piece['transforms'][var], 
+                                                                           control_vars, controller_exprs)
         
         # Generate formulas
         formulas = []
         
-        # Formula 1: Initial states satisfy invariant
         formulas.append(self.generate_formula_initial_invariant(
             state_vars, state_bounds_constraint, initial_constraint, I_expr))
         
-        # Formula 2: Invariant is preserved
         formulas.extend(self.generate_formulas_invariant_preservation(
             state_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint, I_expr, next_state_exprs))
         
-        # Formula 3: V is non-negative on invariant
         formulas.append(self.generate_formula_v_nonnegative(
             state_vars, state_bounds_constraint, I_expr, V_expr))
         
-        # Formula 4: Epsilon is positive
         formulas.append(self.generate_formula_epsilon_positive(epsilon))
         
-        # Formula 5: Expected decrease (no V upper bound for almost-sure)
         formulas.extend(self.generate_formulas_expected_decrease(
             state_vars, noise_vars, state_bounds_constraint, target_bounds,
             I_expr, V_expr, epsilon, next_state_exprs, noise_distribution, v_upper_bound=None))
         
-        # Write SMT2 file
+        # Control bounds (if applicable)
+        if control_vars:
+            control_bounds = config['system']['control_bounds']
+            formulas.extend(self.generate_formulas_control_bounds(
+                state_vars, state_bounds_constraint, I_expr, control_vars, 
+                controller_exprs, control_bounds))
+        
         self._write_smt_file(output_path, formulas)
         
         print(f"Generated SMT2 file (almost-sure reachability): {output_path}")
@@ -538,12 +828,15 @@ class SRSMGenerator:
                                              output_path: str = "./tmp/temporary_polyhorn_input.smt2"):
         """Generate SMT2 file for quantitative reachability (probability < 1)."""
         
+        self.validate_config(config)
+        
         system_type = config['system']['type']
         self.system_type = system_type
         
         degree = config['degree']
         state_vars = config['system']['state_vars']
         noise_vars = config['system'].get('noise_vars', [])
+        control_vars = config['system'].get('control_vars', [])
         state_bounds = config['system'].get('state_bounds', [])
         target_probability = config.get('target_probability', 1.0)
         
@@ -558,7 +851,13 @@ class SRSMGenerator:
         # Generate polynomial templates
         V_expr = self.generate_polynomial_template(state_vars, degree, "V")
         I_expr = self.generate_polynomial_template(state_vars, degree, "I")
-        C_expr = self.generate_polynomial_template(state_vars, degree, "C")
+        
+        # Generate controller templates if control variables exist
+        controller_exprs = {}
+        if control_vars:
+            for control_var in control_vars:
+                controller_exprs[control_var] = self.generate_polynomial_template(state_vars, degree, "C")
+        
         epsilon = self.new_constant("Epsilon")
         
         # Get bounds constraints
@@ -574,7 +873,115 @@ class SRSMGenerator:
             v_upper_bound = None
         
         # Generate dynamics
-        next_state_exprs = self.generate_dynamics_expression(dynamics, state_vars, C_expr, noise_vars)
+        next_state_exprs = self.generate_dynamics_expression(dynamics, state_vars, control_vars, noise_vars)
+        
+        # Substitute controllers into dynamics
+        if control_vars:
+            if isinstance(next_state_exprs, dict):
+                for var in next_state_exprs:
+                    next_state_exprs[var] = self.substitute_control(next_state_exprs[var], 
+                                                                    control_vars, controller_exprs)
+            else:
+                for piece in next_state_exprs:
+                    for var in piece['transforms']:
+                        piece['transforms'][var] = self.substitute_control(piece['transforms'][var], 
+                                                                           control_vars, controller_exprs)
+        
+        # Generate formulas
+        formulas = []
+        
+        formulas.append(self.generate_formula_initial_invariant(
+            state_vars, state_bounds_constraint, initial_constraint, I_expr))
+        
+        formulas.extend(self.generate_formulas_invariant_preservation(
+            state_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint, I_expr, next_state_exprs))
+        
+        formulas.append(self.generate_formula_v_nonnegative(
+            state_vars, state_bounds_constraint, I_expr, V_expr))
+        
+        formulas.append(self.generate_formula_epsilon_positive(epsilon))
+        
+        formulas.extend(self.generate_formulas_expected_decrease(
+            state_vars, noise_vars, state_bounds_constraint, target_bounds,
+            I_expr, V_expr, epsilon, next_state_exprs, noise_distribution, v_upper_bound=v_upper_bound))
+        
+        formulas.append(self.generate_formula_initial_value_bound(
+            state_vars, state_bounds_constraint, initial_constraint, I_expr, V_expr, "1"))
+        
+        # Control bounds (if applicable)
+        if control_vars:
+            control_bounds = config['system']['control_bounds']
+            formulas.extend(self.generate_formulas_control_bounds(
+                state_vars, state_bounds_constraint, I_expr, control_vars, 
+                controller_exprs, control_bounds))
+        
+        self._write_smt_file(output_path, formulas)
+        
+        print(f"Generated SMT2 file (quantitative reachability, p={target_probability}): {output_path}")
+        return output_path
+    
+    def generate_smt_file_quantitative_safety(self, config: Dict[str, Any],
+                                              output_path: str = "./tmp/temporary_polyhorn_input.smt2"):
+        """Generate SMT2 file for quantitative safety."""
+        
+        self.validate_config(config)
+        
+        system_type = config['system']['type']
+        self.system_type = system_type
+        
+        degree = config['degree']
+        state_vars = config['system']['state_vars']
+        noise_vars = config['system'].get('noise_vars', [])
+        control_vars = config['system'].get('control_vars', [])
+        state_bounds = config['system'].get('state_bounds', [])
+        target_probability = config['target_probability']
+        
+        if target_probability <= 0 or target_probability >= 1:
+            raise ValueError("For safety, target_probability must be in (0, 1)")
+        
+        initial_region = config['system']['initial_region']
+        unsafe_region = config['unsafe_region']
+        dynamics = config['system']['dynamics']
+        noise_distribution = config['system'].get('noise_distribution', {})
+        
+        # Validate affine disturbance requirement
+        self.validate_affine_disturbance(dynamics, noise_vars)
+        
+        # Generate polynomial templates
+        V_expr = self.generate_polynomial_template(state_vars, degree, "V")
+        I_expr = self.generate_polynomial_template(state_vars, degree, "I")
+        
+        # Generate controller templates if control variables exist
+        controller_exprs = {}
+        if control_vars:
+            for control_var in control_vars:
+                controller_exprs[control_var] = self.generate_polynomial_template(state_vars, degree, "C")
+        
+        # Safety-specific constants
+        eta = self.new_constant("Eta")
+        epsilon = self.new_constant("Epsilon")
+        beta = self.new_constant("Beta")
+        M = self.new_constant("M")
+        
+        # Get bounds constraints
+        state_bounds_constraint = self.parse_cartesian_bounds(state_bounds, state_vars) if state_bounds else None
+        initial_constraint = self.parse_region(initial_region, state_vars)
+        unsafe_constraint = self.parse_region(unsafe_region, state_vars)
+        
+        # Generate dynamics
+        next_state_exprs = self.generate_dynamics_expression(dynamics, state_vars, control_vars, noise_vars)
+        
+        # Substitute controllers into dynamics
+        if control_vars:
+            if isinstance(next_state_exprs, dict):
+                for var in next_state_exprs:
+                    next_state_exprs[var] = self.substitute_control(next_state_exprs[var], 
+                                                                    control_vars, controller_exprs)
+            else:
+                for piece in next_state_exprs:
+                    for var in piece['transforms']:
+                        piece['transforms'][var] = self.substitute_control(piece['transforms'][var], 
+                                                                           control_vars, controller_exprs)
         
         # Generate formulas
         formulas = []
@@ -584,29 +991,46 @@ class SRSMGenerator:
             state_vars, state_bounds_constraint, initial_constraint, I_expr))
         
         # Formula 2: Invariant is preserved
+        noise_bounds_constraint = self.get_noise_bounds(noise_vars, noise_distribution)
         formulas.extend(self.generate_formulas_invariant_preservation(
             state_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint, I_expr, next_state_exprs))
         
-        # Formula 3: V is non-negative on invariant
-        formulas.append(self.generate_formula_v_nonnegative(
-            state_vars, state_bounds_constraint, I_expr, V_expr))
+        # Formula 3: Initial states have V <= Eta
+        formulas.append(self.generate_formula_initial_eta_bound(
+            state_vars, state_bounds_constraint, initial_constraint, V_expr, eta))
         
-        # Formula 4: Epsilon is positive
+        # Formula 4: Eta <= 0
+        formulas.append(self.generate_formula_eta_nonpositive(eta))
+        
+        # Formula 5: V >= 0 in unsafe region
+        formulas.append(self.generate_formula_unsafe_region_positive(
+            state_vars, state_bounds_constraint, unsafe_constraint, I_expr, V_expr))
+        
+        # Epsilon > 0
         formulas.append(self.generate_formula_epsilon_positive(epsilon))
         
-        # Formula 5: Expected decrease with V upper bound
-        formulas.extend(self.generate_formulas_expected_decrease(
-            state_vars, noise_vars, state_bounds_constraint, target_bounds,
-            I_expr, V_expr, epsilon, next_state_exprs, noise_distribution, v_upper_bound=v_upper_bound))
+        # M > 0
+        formulas.append(self.generate_formula_M_positive(M))
         
-        # Formula 6: Initial value bound
-        formulas.append(self.generate_formula_initial_value_bound(
-            state_vars, state_bounds_constraint, initial_constraint, I_expr, V_expr, "1"))
+        # Formula 6: Expected decrease and bounds
+        formulas.extend(self.generate_formulas_safety_decrease(
+            state_vars, noise_vars, state_bounds_constraint, I_expr, V_expr,
+            epsilon, beta, M, next_state_exprs, noise_distribution, controller_exprs))
         
-        # Write SMT2 file
+        # Formula 7: Probability bound
+        formulas.append(self.generate_formula_probability_bound(
+            target_probability, epsilon, eta, M))
+        
+        # Control bounds (if applicable)
+        if control_vars:
+            control_bounds = config['system']['control_bounds']
+            formulas.extend(self.generate_formulas_control_bounds(
+                state_vars, state_bounds_constraint, I_expr, control_vars, 
+                controller_exprs, control_bounds))
+        
         self._write_smt_file(output_path, formulas)
         
-        print(f"Generated SMT2 file (quantitative reachability, p={target_probability}): {output_path}")
+        print(f"Generated SMT2 file (quantitative safety, p={target_probability}): {output_path}")
         return output_path
     
     def _write_smt_file(self, output_path: str, formulas: List[str]):
@@ -665,12 +1089,19 @@ def main():
     smt_solver = config['smt_solver']
     entailment_solver = config['entailment_solver']
     output_path = config.get('output_smt_path', './tmp/temporary_polyhorn_input.smt2')
-    target_probability = config.get('target_probability', 1.0)
     
     generator = SRSMGenerator()
     
-    # Choose appropriate generation method based on target_probability
-    if target_probability >= 1.0:
+    # Determine specification type
+    has_target = 'target_region' in config
+    has_unsafe = 'unsafe_region' in config
+    target_probability = config.get('target_probability', 1.0)
+    
+    # Generate appropriate SMT file
+    if has_unsafe:
+        print(f"Generating SMT file for quantitative safety (p={target_probability})...")
+        generator.generate_smt_file_quantitative_safety(config, output_path)
+    elif target_probability >= 1.0:
         print("Generating SMT file for almost-sure reachability...")
         generator.generate_smt_file_almost_sure_reach(config, output_path)
     else:

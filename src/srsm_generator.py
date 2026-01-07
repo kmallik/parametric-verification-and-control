@@ -738,6 +738,156 @@ class SRSMGenerator:
         return formulas
     
     # ============================================================================
+    # PARAMETRIC FORMULA GENERATION
+    # ============================================================================
+    
+    def generate_formula_initial_invariant_parametric(self, state_vars: List[str], param_vars: List[str],
+                                                      state_bounds_constraint: str, initial_constraint: str,
+                                                      I_expr: str, Q_expr: str) -> str:
+        """Formula 1 (parametric): Initial states satisfy invariant."""
+        all_vars = state_vars + param_vars
+        lhs = self.combine_constraints(state_bounds_constraint, initial_constraint, f"(>= {Q_expr} 0)")
+        return f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_expr} 0)))"
+    
+    def generate_formulas_invariant_preservation_parametric(self, state_vars: List[str], param_vars: List[str],
+                                                            noise_vars: List[str], state_bounds_constraint: str,
+                                                            noise_bounds_constraint: str, I_expr: str,
+                                                            Q_expr: str, next_state_exprs: Any) -> List[str]:
+        """Formula 2 (parametric): Invariant is preserved."""
+        formulas = []
+        
+        if isinstance(next_state_exprs, dict):
+            I_next = self.substitute_vars(I_expr, next_state_exprs)
+            all_vars = state_vars + param_vars + noise_vars
+            lhs = self.combine_constraints(state_bounds_constraint, noise_bounds_constraint,
+                                          f"(>= {Q_expr} 0)", f"(>= {I_expr} 0)")
+            formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
+            formulas.append(formula)
+        else:
+            for piece in next_state_exprs:
+                condition = piece['condition']
+                transforms = piece['transforms']
+                I_next = self.substitute_vars(I_expr, transforms)
+                
+                all_vars = state_vars + param_vars + noise_vars
+                lhs = self.combine_constraints(state_bounds_constraint, noise_bounds_constraint,
+                                              f"(>= {Q_expr} 0)", condition, f"(>= {I_expr} 0)")
+                formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
+                formulas.append(formula)
+        
+        return formulas
+    
+    def generate_formula_v_nonnegative_parametric(self, state_vars: List[str], param_vars: List[str],
+                                                  state_bounds_constraint: str, I_expr: str,
+                                                  V_expr: str, Q_expr: str) -> str:
+        """Formula 3 (parametric): V is non-negative on invariant."""
+        all_vars = state_vars + param_vars
+        lhs = self.combine_constraints(state_bounds_constraint, f"(>= {Q_expr} 0)", f"(>= {I_expr} 0)")
+        return f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {V_expr} 0)))"
+    
+    def generate_formulas_expected_decrease_parametric(self, state_vars: List[str], param_vars: List[str],
+                                                       noise_vars: List[str], state_bounds_constraint: str,
+                                                       target_bounds: List[Tuple[float, float]],
+                                                       I_expr: str, V_expr: str, Q_expr: str, epsilon: str,
+                                                       next_state_exprs: Any, noise_distribution: Dict[str, Any],
+                                                       v_upper_bound: str = None) -> List[str]:
+        """Formula 5 (parametric): Expected decrease outside target."""
+        formulas = []
+        all_vars = state_vars + param_vars
+        
+        if isinstance(next_state_exprs, dict):
+            V_next = self.substitute_vars(V_expr, next_state_exprs)
+            
+            if noise_vars:
+                E_V_next = self.compute_expected_value(V_next, noise_vars, noise_distribution)
+            else:
+                E_V_next = V_next
+            
+            decrease = f"(- {V_expr} {E_V_next})"
+            
+            not_target_cases = self.negate_cartesian_bounds(target_bounds, state_vars)
+            for not_target_constraint in not_target_cases:
+                if not self.is_satisfiable_combination(state_bounds_constraint, not_target_constraint):
+                    continue
+                
+                lhs_constraints = [state_bounds_constraint, f"(>= {Q_expr} 0)", 
+                                  not_target_constraint, f"(>= {I_expr} 0)"]
+                if v_upper_bound:
+                    lhs_constraints.append(f"(<= {V_expr} {v_upper_bound})")
+                
+                lhs = self.combine_constraints(*lhs_constraints)
+                formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {decrease} {epsilon})))"
+                formulas.append(formula)
+        else:
+            for piece in next_state_exprs:
+                condition = piece['condition']
+                transforms = piece['transforms']
+                V_next = self.substitute_vars(V_expr, transforms)
+                
+                if noise_vars:
+                    E_V_next = self.compute_expected_value(V_next, noise_vars, noise_distribution)
+                else:
+                    E_V_next = V_next
+                
+                decrease = f"(- {V_expr} {E_V_next})"
+                
+                not_target_cases = self.negate_cartesian_bounds(target_bounds, state_vars)
+                
+                for not_target_constraint in not_target_cases:
+                    if not self.is_satisfiable_combination(state_bounds_constraint, condition, not_target_constraint):
+                        continue
+                    
+                    lhs_constraints = [state_bounds_constraint, f"(>= {Q_expr} 0)", condition,
+                                      not_target_constraint, f"(>= {I_expr} 0)"]
+                    if v_upper_bound:
+                        lhs_constraints.append(f"(<= {V_expr} {v_upper_bound})")
+                    
+                    lhs = self.combine_constraints(*lhs_constraints)
+                    formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {decrease} {epsilon})))"
+                    formulas.append(formula)
+        
+        return formulas
+    
+    def generate_formula_q_midpoint_positive(self, param_vars: List[str], Q_expr: str,
+                                            param_bounds: List[Tuple[float, float]]) -> str:
+        """Generate formula: Q(P_mid) > 0 where P_mid is midpoint of parameter space."""
+        # Calculate midpoint for each parameter
+        Q_at_midpoint = Q_expr
+        for i, param_var in enumerate(param_vars):
+            lower, upper = param_bounds[i]
+            midpoint = (lower + upper) / 2.0
+            # Replace parameter with its midpoint value
+            import re
+            pattern = r'\b' + re.escape(param_var) + r'\b'
+            Q_at_midpoint = re.sub(pattern, str(midpoint), Q_at_midpoint)
+        
+        min_float = "1.0e-15"
+        return f"(>= (+ {Q_at_midpoint} (* -1 {min_float})) 0)"
+    
+    def generate_formulas_control_bounds_parametric(self, state_vars: List[str], param_vars: List[str],
+                                                    state_bounds_constraint: str, I_expr: str, Q_expr: str,
+                                                    control_vars: List[str], controller_exprs: Dict[str, str],
+                                                    control_bounds: List[Tuple[float, float]]) -> List[str]:
+        """Generate control bound formulas for parametric systems."""
+        formulas = []
+        all_vars = state_vars + param_vars
+        
+        for i, control_var in enumerate(control_vars):
+            if control_var not in controller_exprs:
+                continue
+            
+            controller = controller_exprs[control_var]
+            u_min, u_max = control_bounds[i]
+            
+            lhs = self.combine_constraints(state_bounds_constraint, f"(>= {Q_expr} 0)", f"(>= {I_expr} 0)")
+            rhs = f"(and (>= {controller} {u_min}) (<= {controller} {u_max}))"
+            
+            formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} {rhs}))"
+            formulas.append(formula)
+        
+        return formulas
+    
+    # ============================================================================
     # MAIN SMT GENERATION FUNCTIONS
     # ============================================================================
     
@@ -754,6 +904,7 @@ class SRSMGenerator:
         state_vars = config['system']['state_vars']
         noise_vars = config['system'].get('noise_vars', [])
         control_vars = config['system'].get('control_vars', [])
+        param_vars = config['system'].get('param_vars', [])
         state_bounds = config['system'].get('state_bounds', [])
         
         initial_region = config['system']['initial_region']
@@ -761,9 +912,17 @@ class SRSMGenerator:
         dynamics = config['system']['dynamics']
         noise_distribution = config['system'].get('noise_distribution', {})
         
+        # Check if this is parametric
+        is_parametric = len(param_vars) > 0
+        
         # Generate polynomial templates
         V_expr = self.generate_polynomial_template(state_vars, degree, "V")
         I_expr = self.generate_polynomial_template(state_vars, degree, "I")
+        
+        # Generate Q template for parameters if parametric
+        Q_expr = None
+        if is_parametric:
+            Q_expr = self.generate_polynomial_template(param_vars, degree, "Q")
         
         # Generate controller templates if control variables exist
         controller_exprs = {}
@@ -797,31 +956,67 @@ class SRSMGenerator:
         # Generate formulas
         formulas = []
         
-        formulas.append(self.generate_formula_initial_invariant(
-            state_vars, state_bounds_constraint, initial_constraint, I_expr))
+        # Formula 1: Initial states satisfy invariant
+        if is_parametric:
+            formulas.append(self.generate_formula_initial_invariant_parametric(
+                state_vars, param_vars, state_bounds_constraint, initial_constraint, I_expr, Q_expr))
+        else:
+            formulas.append(self.generate_formula_initial_invariant(
+                state_vars, state_bounds_constraint, initial_constraint, I_expr))
         
-        formulas.extend(self.generate_formulas_invariant_preservation(
-            state_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint, I_expr, next_state_exprs))
+        # Formula 2: Invariant is preserved
+        if is_parametric:
+            formulas.extend(self.generate_formulas_invariant_preservation_parametric(
+                state_vars, param_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint, 
+                I_expr, Q_expr, next_state_exprs))
+        else:
+            formulas.extend(self.generate_formulas_invariant_preservation(
+                state_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint, I_expr, next_state_exprs))
         
-        formulas.append(self.generate_formula_v_nonnegative(
-            state_vars, state_bounds_constraint, I_expr, V_expr))
+        # Formula 3: V is non-negative on invariant
+        if is_parametric:
+            formulas.append(self.generate_formula_v_nonnegative_parametric(
+                state_vars, param_vars, state_bounds_constraint, I_expr, V_expr, Q_expr))
+        else:
+            formulas.append(self.generate_formula_v_nonnegative(
+                state_vars, state_bounds_constraint, I_expr, V_expr))
         
+        # Formula 4: Epsilon is positive
         formulas.append(self.generate_formula_epsilon_positive(epsilon))
         
-        formulas.extend(self.generate_formulas_expected_decrease(
-            state_vars, noise_vars, state_bounds_constraint, target_bounds,
-            I_expr, V_expr, epsilon, next_state_exprs, noise_distribution, v_upper_bound=None))
+        # Formula 5: Expected decrease
+        if is_parametric:
+            formulas.extend(self.generate_formulas_expected_decrease_parametric(
+                state_vars, param_vars, noise_vars, state_bounds_constraint, target_bounds,
+                I_expr, V_expr, Q_expr, epsilon, next_state_exprs, noise_distribution, v_upper_bound=None))
+        else:
+            formulas.extend(self.generate_formulas_expected_decrease(
+                state_vars, noise_vars, state_bounds_constraint, target_bounds,
+                I_expr, V_expr, epsilon, next_state_exprs, noise_distribution, v_upper_bound=None))
+        
+        # Parametric-specific formula: Q(P_mid) > 0
+        if is_parametric:
+            param_bounds = config['system']['param_bounds']
+            formulas.append(self.generate_formula_q_midpoint_positive(param_vars, Q_expr, param_bounds))
         
         # Control bounds (if applicable)
         if control_vars:
             control_bounds = config['system']['control_bounds']
-            formulas.extend(self.generate_formulas_control_bounds(
-                state_vars, state_bounds_constraint, I_expr, control_vars, 
-                controller_exprs, control_bounds))
+            if is_parametric:
+                formulas.extend(self.generate_formulas_control_bounds_parametric(
+                    state_vars, param_vars, state_bounds_constraint, I_expr, Q_expr,
+                    control_vars, controller_exprs, control_bounds))
+            else:
+                formulas.extend(self.generate_formulas_control_bounds(
+                    state_vars, state_bounds_constraint, I_expr, control_vars, 
+                    controller_exprs, control_bounds))
         
         self._write_smt_file(output_path, formulas)
         
-        print(f"Generated SMT2 file (almost-sure reachability): {output_path}")
+        if is_parametric:
+            print(f"Generated SMT2 file (parametric almost-sure reachability): {output_path}")
+        else:
+            print(f"Generated SMT2 file (almost-sure reachability): {output_path}")
         return output_path
     
     def generate_smt_file_quantitative_reach(self, config: Dict[str, Any], 

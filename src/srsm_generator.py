@@ -301,15 +301,20 @@ class SRSMGenerator:
                 result = re.sub(pattern, controller, result)
         return result
     
-    def compute_expected_value(self, expr: str, noise_vars: List[str], 
+    def substitute_noise_with_bound(self, expr: str, noise_var: str, bound_value: float) -> str:
+        """Substitute a specific noise variable with a bound value (lower or upper)."""
+        pattern = r'\b' + re.escape(noise_var) + r'\b'
+        return re.sub(pattern, str(bound_value), expr)
+
+    def compute_expected_value(self, expr: str, noise_vars: List[str],
                               noise_dist: Dict[str, Any]) -> str:
         """Compute expected value by replacing noise with means."""
         dist_type = noise_dist.get('type', 'uniform')
-        
+
         if dist_type == 'uniform':
             lower_bounds = noise_dist['params']['lower']
             upper_bounds = noise_dist['params']['upper']
-            
+
             result = expr
             for i, noise_var in enumerate(noise_vars):
                 mean = (lower_bounds[i] + upper_bounds[i]) / 2.0
@@ -359,11 +364,81 @@ class SRSMGenerator:
             if len(control_bounds) != len(control_vars):
                 raise ValueError(f"Number of control_bounds must match number of control_vars.")
     
+    def detect_param_noise_multiplication(self, expr: str, param_vars: List[str],
+                                          noise_vars: List[str]) -> List[Tuple[str, str]]:
+        """Detect parameter*noise multiplication patterns in expression.
+
+        Returns list of (param, noise) tuples found in the expression.
+        """
+        param_noise_pairs = []
+
+        # Look for patterns like (* P W) or (* W P)
+        for param in param_vars:
+            for noise in noise_vars:
+                pattern1 = f"(* {param} {noise})"
+                pattern2 = f"(* {noise} {param})"
+                if pattern1 in expr or pattern2 in expr:
+                    param_noise_pairs.append((param, noise))
+
+        return param_noise_pairs
+
+    def validate_linearity_with_param_noise(self, expr: str, state_vars: List[str],
+                                           control_vars: List[str], param_vars: List[str],
+                                           noise_vars: List[str]) -> bool:
+        """Validate that expression is linear except for allowed param*noise terms.
+
+        Allowed: P*W terms
+        Not allowed: S*S, S*U, S*P, U*U, U*P, W*W, P*P terms
+        """
+        # Check for state variable multiplications
+        for s1 in state_vars:
+            for s2 in state_vars:
+                if f"(* {s1} {s2})" in expr or f"(* {s2} {s1})" in expr:
+                    return False
+
+        # Check for state*control multiplications
+        for s in state_vars:
+            for u in control_vars:
+                if f"(* {s} {u})" in expr or f"(* {u} {s})" in expr:
+                    return False
+
+        # Check for state*param multiplications
+        for s in state_vars:
+            for p in param_vars:
+                if f"(* {s} {p})" in expr or f"(* {p} {s})" in expr:
+                    return False
+
+        # Check for control*control multiplications
+        for u1 in control_vars:
+            for u2 in control_vars:
+                if f"(* {u1} {u2})" in expr or f"(* {u2} {u1})" in expr:
+                    return False
+
+        # Check for control*param multiplications
+        for u in control_vars:
+            for p in param_vars:
+                if f"(* {u} {p})" in expr or f"(* {p} {u})" in expr:
+                    return False
+
+        # Check for noise*noise multiplications (not allowed)
+        for w1 in noise_vars:
+            for w2 in noise_vars:
+                if f"(* {w1} {w2})" in expr or f"(* {w2} {w1})" in expr:
+                    return False
+
+        # Check for param*param multiplications
+        for p1 in param_vars:
+            for p2 in param_vars:
+                if f"(* {p1} {p2})" in expr or f"(* {p2} {p1})" in expr:
+                    return False
+
+        return True
+
     def validate_affine_disturbance(self, dynamics: Any, noise_vars: List[str]):
         """Validate affine disturbance for safety."""
         if not noise_vars:
             return True
-        
+
         def check_transform(transform_expr: str) -> bool:
             for noise_var in noise_vars:
                 if noise_var in transform_expr:
@@ -372,7 +447,7 @@ class SRSMGenerator:
                     if f'(/ {noise_var}' in transform_expr or f'/ {noise_var})' in transform_expr:
                         return False
             return True
-        
+
         if isinstance(dynamics, dict) and 'expressions' in dynamics:
             for var, expr in dynamics['expressions'].items():
                 if not check_transform(expr):
@@ -383,7 +458,7 @@ class SRSMGenerator:
                 for var, expr in transforms.items():
                     if not check_transform(expr):
                         raise ValueError(f"Disturbance must appear in affine form: {var} = g(...) + W. Got: {expr}")
-        
+
         return True
     
     # ============================================================================
@@ -546,29 +621,191 @@ class SRSMGenerator:
     def generate_formulas_invariant_preservation_parametric(self, state_vars: List[str], param_vars: List[str],
                                                             noise_vars: List[str], state_bounds_constraint: str,
                                                             noise_bounds_constraint: str, I_expr: str,
-                                                            Q_expr: str, next_state_exprs: Any) -> List[str]:
-        """Formula 2 (parametric): Invariant is preserved."""
+                                                            Q_expr: str, next_state_exprs: Any,
+                                                            noise_distribution: Dict[str, Any] = None,
+                                                            use_param_noise_bounds: bool = False) -> List[str]:
+        """Formula 2 (parametric): Invariant is preserved.
+
+        Args:
+            use_param_noise_bounds: If True and param*noise terms are detected,
+                                   generate separate formulas for each noise bound combination.
+        """
         formulas = []
-        
-        if isinstance(next_state_exprs, dict):
-            I_next = self.substitute_vars(I_expr, next_state_exprs)
-            all_vars = state_vars + param_vars + noise_vars
-            lhs = self.combine_constraints(state_bounds_constraint, noise_bounds_constraint,
-                                          f"(>= {Q_expr} 0)", f"(>= {I_expr} 0)")
-            formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
-            formulas.append(formula)
+
+        # Check if we have param*noise multiplication
+        has_param_noise = False
+        if use_param_noise_bounds and param_vars and noise_vars:
+            # Check if any transform has param*noise multiplication
+            if isinstance(next_state_exprs, dict):
+                for expr in next_state_exprs.values():
+                    if self.detect_param_noise_multiplication(expr, param_vars, noise_vars):
+                        has_param_noise = True
+                        break
+            else:
+                for piece in next_state_exprs:
+                    for expr in piece['transforms'].values():
+                        if self.detect_param_noise_multiplication(expr, param_vars, noise_vars):
+                            has_param_noise = True
+                            break
+                    if has_param_noise:
+                        break
+
+        if has_param_noise and noise_distribution:
+            # Generate formulas with noise variables replaced by bound combinations
+            dist_type = noise_distribution.get('type', 'uniform')
+            if dist_type != 'uniform':
+                raise ValueError("Param*noise multiplication only supported for uniform noise distribution")
+
+            lower_bounds = noise_distribution['params']['lower']
+            upper_bounds = noise_distribution['params']['upper']
+
+            if isinstance(next_state_exprs, dict):
+                # For each state variable's transform, determine which noise variables it uses
+                transform_noise_usage = {}  # Maps state_var -> set of noise vars it uses
+                for state_var, expr in next_state_exprs.items():
+                    used_noise = set()
+                    for noise_var in noise_vars:
+                        if noise_var in expr:
+                            used_noise.add(noise_var)
+                    transform_noise_usage[state_var] = used_noise
+
+                # Find all unique sets of noise variables used
+                unique_noise_sets = set()
+                for used_noise in transform_noise_usage.values():
+                    unique_noise_sets.add(frozenset(used_noise))
+
+                # For each unique set of noise variables, generate formulas
+                for noise_set in unique_noise_sets:
+                    noise_set_list = sorted(list(noise_set))  # Convert to sorted list for consistent ordering
+
+                    # Get indices for these noise variables
+                    active_indices = [noise_vars.index(nv) for nv in noise_set_list]
+                    n_active = len(active_indices)
+
+                    # Skip if no noise variables (will be handled by non-param-noise case)
+                    if n_active == 0:
+                        continue
+
+                    # Generate all 2^n_active combinations
+                    for i in range(2**n_active):
+                        noise_substitutions = {}
+                        for local_j, global_j in enumerate(active_indices):
+                            noise_var = noise_vars[global_j]
+                            if (i >> local_j) & 1:
+                                noise_substitutions[noise_var] = upper_bounds[global_j]
+                            else:
+                                noise_substitutions[noise_var] = lower_bounds[global_j]
+
+                        # Apply substitutions only to transforms that use these noise variables
+                        next_state_subst = {}
+                        for state_var, expr in next_state_exprs.items():
+                            if transform_noise_usage[state_var] == set(noise_set_list):
+                                # This transform uses exactly this set of noise variables
+                                result_expr = expr
+                                for noise_var, bound_value in noise_substitutions.items():
+                                    result_expr = self.substitute_noise_with_bound(result_expr, noise_var, bound_value)
+                                next_state_subst[state_var] = result_expr
+                            else:
+                                # Use original expression
+                                next_state_subst[state_var] = expr
+
+                        I_next = self.substitute_vars(I_expr, next_state_subst)
+
+                        all_vars = state_vars + param_vars
+                        lhs = self.combine_constraints(state_bounds_constraint, f"(>= {Q_expr} 0)", f"(>= {I_expr} 0)")
+
+                        formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
+                        formulas.append(formula)
+            else:
+                for piece in next_state_exprs:
+                    condition = piece['condition']
+                    transforms = piece['transforms']
+
+                    # For each transform in this piece, determine which noise variables it uses
+                    transform_noise_usage = {}
+                    for state_var, expr in transforms.items():
+                        used_noise = set()
+                        for noise_var in noise_vars:
+                            if noise_var in expr:
+                                used_noise.add(noise_var)
+                        transform_noise_usage[state_var] = used_noise
+
+                    # Check if any transform in this piece uses noise
+                    has_any_noise = any(len(used) > 0 for used in transform_noise_usage.values())
+
+                    if not has_any_noise:
+                        # No noise in this piece, use standard formulation without noise variables
+                        I_next = self.substitute_vars(I_expr, transforms)
+                        all_vars = state_vars + param_vars
+                        lhs = self.combine_constraints(state_bounds_constraint, f"(>= {Q_expr} 0)",
+                                                      condition, f"(>= {I_expr} 0)")
+                        formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
+                        formulas.append(formula)
+                    else:
+                        # Find all unique sets of noise variables used in this piece
+                        unique_noise_sets = set()
+                        for used_noise in transform_noise_usage.values():
+                            unique_noise_sets.add(frozenset(used_noise))
+
+                        # For each unique set, generate formulas
+                        for noise_set in unique_noise_sets:
+                            noise_set_list = sorted(list(noise_set))
+                            active_indices = [noise_vars.index(nv) for nv in noise_set_list]
+                            n_active = len(active_indices)
+
+                            if n_active == 0:
+                                continue
+
+                            # Generate all 2^n_active combinations
+                            for i in range(2**n_active):
+                                noise_substitutions = {}
+                                for local_j, global_j in enumerate(active_indices):
+                                    noise_var = noise_vars[global_j]
+                                    if (i >> local_j) & 1:
+                                        noise_substitutions[noise_var] = upper_bounds[global_j]
+                                    else:
+                                        noise_substitutions[noise_var] = lower_bounds[global_j]
+
+                                # Apply substitutions only to transforms that use these noise variables
+                                transforms_subst = {}
+                                for state_var, expr in transforms.items():
+                                    if transform_noise_usage[state_var] == set(noise_set_list):
+                                        result_expr = expr
+                                        for noise_var, bound_value in noise_substitutions.items():
+                                            result_expr = self.substitute_noise_with_bound(result_expr, noise_var, bound_value)
+                                        transforms_subst[state_var] = result_expr
+                                    else:
+                                        transforms_subst[state_var] = expr
+
+                                I_next = self.substitute_vars(I_expr, transforms_subst)
+
+                                all_vars = state_vars + param_vars
+                                lhs = self.combine_constraints(state_bounds_constraint, f"(>= {Q_expr} 0)",
+                                                              condition, f"(>= {I_expr} 0)")
+
+                                formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
+                                formulas.append(formula)
         else:
-            for piece in next_state_exprs:
-                condition = piece['condition']
-                transforms = piece['transforms']
-                I_next = self.substitute_vars(I_expr, transforms)
-                
+            # Original formulation with universal quantification over noise
+            if isinstance(next_state_exprs, dict):
+                I_next = self.substitute_vars(I_expr, next_state_exprs)
                 all_vars = state_vars + param_vars + noise_vars
                 lhs = self.combine_constraints(state_bounds_constraint, noise_bounds_constraint,
-                                              f"(>= {Q_expr} 0)", condition, f"(>= {I_expr} 0)")
+                                              f"(>= {Q_expr} 0)", f"(>= {I_expr} 0)")
                 formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
                 formulas.append(formula)
-        
+            else:
+                for piece in next_state_exprs:
+                    condition = piece['condition']
+                    transforms = piece['transforms']
+                    I_next = self.substitute_vars(I_expr, transforms)
+
+                    all_vars = state_vars + param_vars + noise_vars
+                    lhs = self.combine_constraints(state_bounds_constraint, noise_bounds_constraint,
+                                                  f"(>= {Q_expr} 0)", condition, f"(>= {I_expr} 0)")
+                    formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
+                    formulas.append(formula)
+
         return formulas
     
     def generate_formula_v_nonnegative_parametric(self, state_vars: List[str], param_vars: List[str],
@@ -802,7 +1039,19 @@ class SRSMGenerator:
         target_bounds = config['target_region']['bounds']
         
         next_state_exprs = self.generate_dynamics_expression(config['system']['dynamics'], state_vars, control_vars, noise_vars)
-        
+
+        # Validate linearity if we have param*noise multiplication
+        if is_parametric and param_vars and noise_vars:
+            if isinstance(next_state_exprs, dict):
+                for var, expr in next_state_exprs.items():
+                    if not self.validate_linearity_with_param_noise(expr, state_vars, control_vars, param_vars, noise_vars):
+                        raise ValueError(f"Expression for '{var}' must be linear except for param*noise terms. Got: {expr}")
+            else:
+                for piece in next_state_exprs:
+                    for var, expr in piece['transforms'].items():
+                        if not self.validate_linearity_with_param_noise(expr, state_vars, control_vars, param_vars, noise_vars):
+                            raise ValueError(f"Expression for '{var}' must be linear except for param*noise terms. Got: {expr}")
+
         if control_vars:
             if isinstance(next_state_exprs, dict):
                 for var in next_state_exprs:
@@ -818,8 +1067,10 @@ class SRSMGenerator:
             formulas.append(self.generate_formula_initial_invariant_parametric(
                 state_vars, param_vars, state_bounds_constraint, initial_constraint, I_expr, Q_expr))
             formulas.extend(self.generate_formulas_invariant_preservation_parametric(
-                state_vars, param_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint, 
-                I_expr, Q_expr, next_state_exprs))
+                state_vars, param_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint,
+                I_expr, Q_expr, next_state_exprs,
+                noise_distribution=config['system'].get('noise_distribution', {}),
+                use_param_noise_bounds=True))
             formulas.append(self.generate_formula_v_nonnegative_parametric(
                 state_vars, param_vars, state_bounds_constraint, I_expr, V_expr, Q_expr))
         else:
@@ -928,6 +1179,18 @@ class SRSMGenerator:
 
         next_state_exprs = self.generate_dynamics_expression(config['system']['dynamics'], state_vars, control_vars, noise_vars)
 
+        # Validate linearity if we have param*noise multiplication
+        if is_parametric and param_vars and noise_vars:
+            if isinstance(next_state_exprs, dict):
+                for var, expr in next_state_exprs.items():
+                    if not self.validate_linearity_with_param_noise(expr, state_vars, control_vars, param_vars, noise_vars):
+                        raise ValueError(f"Expression for '{var}' must be linear except for param*noise terms. Got: {expr}")
+            else:
+                for piece in next_state_exprs:
+                    for var, expr in piece['transforms'].items():
+                        if not self.validate_linearity_with_param_noise(expr, state_vars, control_vars, param_vars, noise_vars):
+                            raise ValueError(f"Expression for '{var}' must be linear except for param*noise terms. Got: {expr}")
+
         if control_vars:
             if isinstance(next_state_exprs, dict):
                 for var in next_state_exprs:
@@ -944,7 +1207,9 @@ class SRSMGenerator:
                 state_vars, param_vars, state_bounds_constraint, initial_constraint, I_expr, Q_expr))
             formulas.extend(self.generate_formulas_invariant_preservation_parametric(
                 state_vars, param_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint,
-                I_expr, Q_expr, next_state_exprs))
+                I_expr, Q_expr, next_state_exprs,
+                noise_distribution=config['system'].get('noise_distribution', {}),
+                use_param_noise_bounds=True))
             formulas.append(self.generate_formula_v_nonnegative_parametric(
                 state_vars, param_vars, state_bounds_constraint, I_expr, V_expr, Q_expr))
         else:
@@ -1067,6 +1332,18 @@ class SRSMGenerator:
 
         next_state_exprs = self.generate_dynamics_expression(config['system']['dynamics'], state_vars, control_vars, noise_vars)
 
+        # Validate linearity if we have param*noise multiplication
+        if param_vars and noise_vars:
+            if isinstance(next_state_exprs, dict):
+                for var, expr in next_state_exprs.items():
+                    if not self.validate_linearity_with_param_noise(expr, state_vars, control_vars, param_vars, noise_vars):
+                        raise ValueError(f"Expression for '{var}' must be linear except for param*noise terms. Got: {expr}")
+            else:
+                for piece in next_state_exprs:
+                    for var, expr in piece['transforms'].items():
+                        if not self.validate_linearity_with_param_noise(expr, state_vars, control_vars, param_vars, noise_vars):
+                            raise ValueError(f"Expression for '{var}' must be linear except for param*noise terms. Got: {expr}")
+
         if control_vars:
             if isinstance(next_state_exprs, dict):
                 for var in next_state_exprs:
@@ -1085,7 +1362,9 @@ class SRSMGenerator:
         # Formula 2: Invariant is preserved
         formulas.extend(self.generate_formulas_invariant_preservation_parametric(
             state_vars, param_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint,
-            I_expr, Q_expr, next_state_exprs))
+            I_expr, Q_expr, next_state_exprs,
+            noise_distribution=config['system'].get('noise_distribution', {}),
+            use_param_noise_bounds=True))
 
         # Formula 3: V is non-negative on invariant
         formulas.append(self.generate_formula_v_nonnegative_parametric(

@@ -38,6 +38,6 @@
   "target_probability": 1.0,
   "degree": 1,
   "smt_solver": "z3",
-  "entailment_solver": "farkas",
+  "entailment_solver": "handelman",
   "output_smt_path": "./tmp/temporary_polyhorn_input.smt2"
 }

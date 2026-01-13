@@ -95,18 +95,25 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         has_target = 'target_region' in config
         has_unsafe = 'unsafe_region' in config
         target_probability = config.get('target_probability', 1.0)
+        use_simplified_parametric = config.get('simplified_parametric', False)
 
         # Determine which type of specification
         if has_target and not has_unsafe:
             # Reachability specification
             if target_probability < 1.0:
-                generator.generate_smt_file_quantitative_reach(config, output_path, override_param_bounds=current_bounds)
+                if use_simplified_parametric:
+                    generator.generate_smt_file_quantitative_reach_simplified(config, output_path, override_param_bounds=current_bounds)
+                else:
+                    generator.generate_smt_file_quantitative_reach(config, output_path, override_param_bounds=current_bounds)
             else:
                 generator.generate_smt_file_almost_sure_reach(config, output_path, override_param_bounds=current_bounds)
         elif has_unsafe and not has_target:
             # Safety specification
             if target_probability < 1.0:
-                generator.generate_smt_file_quantitative_safety(config, output_path, override_param_bounds=current_bounds)
+                if use_simplified_parametric:
+                    generator.generate_smt_file_quantitative_safety_simplified(config, output_path, override_param_bounds=current_bounds)
+                else:
+                    generator.generate_smt_file_quantitative_safety(config, output_path, override_param_bounds=current_bounds)
             else:
                 raise NotImplementedError("Qualitative safety (target_probability = 1) not yet implemented")
         else:
@@ -219,21 +226,30 @@ def main():
         has_target = 'target_region' in config
         has_unsafe = 'unsafe_region' in config
         target_probability = config.get('target_probability', 1.0)
+        use_simplified_parametric = config.get('simplified_parametric', False)
 
         # Determine which type of specification
         if has_target and not has_unsafe:
             # Reachability specification
             if target_probability < 1.0:
-                print(f"Generating SMT file for quantitative reachability (probability: {target_probability})...")
-                generator.generate_smt_file_quantitative_reach(config, output_path)
+                if use_simplified_parametric:
+                    print(f"Generating SMT file for quantitative reachability (simplified, probability: {target_probability})...")
+                    generator.generate_smt_file_quantitative_reach_simplified(config, output_path)
+                else:
+                    print(f"Generating SMT file for quantitative reachability (probability: {target_probability})...")
+                    generator.generate_smt_file_quantitative_reach(config, output_path)
             else:
                 print("Generating SMT file for almost-sure reachability...")
                 generator.generate_smt_file_quantitative_reach(config, output_path)
         elif has_unsafe and not has_target:
             # Safety specification
             if target_probability < 1.0:
-                print(f"Generating SMT file for quantitative safety (probability: {target_probability})...")
-                generator.generate_smt_file_quantitative_safety(config, output_path)
+                if use_simplified_parametric:
+                    print(f"Generating SMT file for quantitative safety (simplified, probability: {target_probability})...")
+                    generator.generate_smt_file_quantitative_safety_simplified(config, output_path)
+                else:
+                    print(f"Generating SMT file for quantitative safety (probability: {target_probability})...")
+                    generator.generate_smt_file_quantitative_safety(config, output_path)
             else:
                 print("Generating SMT file for qualitative safety...")
                 raise NotImplementedError("Qualitative safety (target_probability = 1) not yet implemented")

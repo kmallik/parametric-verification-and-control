@@ -33,6 +33,7 @@
   "target_region": {
     "bounds": [[90, 150]]
   },
+  "simplified_parametric": true,
   "enable_param_refinement": true,
   "param_refinement_threshold": 0.1,
   "parallel_refinement": true,

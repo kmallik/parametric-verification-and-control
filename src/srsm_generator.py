@@ -986,7 +986,359 @@ class SRSMGenerator:
             formulas.append(formula)
         
         return formulas
-    
+
+    # ============================================================================
+    # SIMPLIFIED PARAMETRIC FORMULA GENERATION (No Q constraints)
+    # ============================================================================
+
+    def generate_formula_initial_invariant_parametric_simplified(self, state_vars: List[str], param_vars: List[str],
+                                                                 state_bounds_constraint: str, initial_constraint: str,
+                                                                 param_bounds_constraint: str, I_expr: str) -> str:
+        """Formula 1 (parametric simplified): Initial states satisfy invariant.
+
+        Simplified version that uses parameter bounds instead of Q(P) >= 0.
+        """
+        all_vars = state_vars + param_vars
+        lhs = self.combine_constraints(state_bounds_constraint, initial_constraint, param_bounds_constraint)
+        return f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_expr} 0)))"
+
+    def generate_formulas_invariant_preservation_parametric_simplified(self, state_vars: List[str], param_vars: List[str],
+                                                                       noise_vars: List[str], state_bounds_constraint: str,
+                                                                       param_bounds_constraint: str, noise_bounds_constraint: str,
+                                                                       I_expr: str, next_state_exprs: Any,
+                                                                       noise_distribution: Dict[str, Any] = None,
+                                                                       use_param_noise_bounds: bool = False) -> List[str]:
+        """Formula 2 (parametric simplified): Invariant is preserved by dynamics.
+
+        Simplified version that uses parameter bounds instead of Q(P) >= 0.
+        """
+        formulas = []
+
+        # Determine lower and upper bounds for noise variables
+        lower_bounds = []
+        upper_bounds = []
+        if noise_distribution and noise_distribution.get('type') == 'uniform':
+            params = noise_distribution.get('params', {})
+            lower_bounds = params.get('lower', [])
+            upper_bounds = params.get('upper', [])
+
+        # Check if we should use param*noise corner point substitution
+        if use_param_noise_bounds and len(lower_bounds) == len(noise_vars):
+            # This is the param*noise multiplication case - use corner points
+
+            if isinstance(next_state_exprs, list):
+                # Piecewise dynamics
+                for piece in next_state_exprs:
+                    condition = piece['condition']
+                    transforms = piece['transforms']
+
+                    # For each transform in this piece, determine which noise variables it uses
+                    transform_noise_usage = {}
+                    for state_var, expr in transforms.items():
+                        used_noise = set()
+                        for noise_var in noise_vars:
+                            if noise_var in expr:
+                                used_noise.add(noise_var)
+                        transform_noise_usage[state_var] = used_noise
+
+                    # Check if any transform in this piece uses noise
+                    has_any_noise = any(len(used) > 0 for used in transform_noise_usage.values())
+
+                    if not has_any_noise:
+                        # No noise in this piece, use standard formulation without noise variables
+                        I_next = self.substitute_vars(I_expr, transforms)
+                        all_vars = state_vars + param_vars
+                        lhs = self.combine_constraints(state_bounds_constraint, param_bounds_constraint,
+                                                      condition, f"(>= {I_expr} 0)")
+                        formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
+                        formulas.append(formula)
+                    else:
+                        # Find all unique sets of noise variables used in this piece
+                        unique_noise_sets = set()
+                        for used_noise in transform_noise_usage.values():
+                            unique_noise_sets.add(frozenset(used_noise))
+
+                        # For each unique set, generate formulas
+                        for noise_set in unique_noise_sets:
+                            noise_set_list = sorted(list(noise_set))
+                            active_indices = [noise_vars.index(nv) for nv in noise_set_list]
+                            n_active = len(active_indices)
+
+                            if n_active == 0:
+                                continue
+
+                            # Generate all 2^n_active combinations
+                            for i in range(2**n_active):
+                                noise_substitutions = {}
+                                for local_j, global_j in enumerate(active_indices):
+                                    noise_var = noise_vars[global_j]
+                                    if (i >> local_j) & 1:
+                                        noise_substitutions[noise_var] = upper_bounds[global_j]
+                                    else:
+                                        noise_substitutions[noise_var] = lower_bounds[global_j]
+
+                                # Apply substitutions only to transforms that use these noise variables
+                                transforms_subst = {}
+                                for state_var, expr in transforms.items():
+                                    if transform_noise_usage[state_var] == set(noise_set_list):
+                                        result_expr = expr
+                                        for noise_var, bound_value in noise_substitutions.items():
+                                            result_expr = self.substitute_noise_with_bound(result_expr, noise_var, bound_value)
+                                        transforms_subst[state_var] = result_expr
+                                    else:
+                                        transforms_subst[state_var] = expr
+
+                                I_next = self.substitute_vars(I_expr, transforms_subst)
+
+                                all_vars = state_vars + param_vars
+                                lhs = self.combine_constraints(state_bounds_constraint, param_bounds_constraint,
+                                                              condition, f"(>= {I_expr} 0)")
+                                formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
+                                formulas.append(formula)
+            else:
+                # Single transform case with param*noise
+                # Detect which noise variables are used
+                used_noise = set()
+                for noise_var in noise_vars:
+                    for expr in next_state_exprs.values():
+                        if noise_var in expr:
+                            used_noise.add(noise_var)
+                            break
+
+                used_noise_list = sorted(list(used_noise))
+                active_indices = [noise_vars.index(nv) for nv in used_noise_list]
+                n_active = len(active_indices)
+
+                # Generate all 2^n_active combinations
+                for i in range(2**n_active):
+                    noise_substitutions = {}
+                    for local_j, global_j in enumerate(active_indices):
+                        noise_var = noise_vars[global_j]
+                        if (i >> local_j) & 1:
+                            noise_substitutions[noise_var] = upper_bounds[global_j]
+                        else:
+                            noise_substitutions[noise_var] = lower_bounds[global_j]
+
+                    # Apply substitutions
+                    transforms_subst = {}
+                    for state_var, expr in next_state_exprs.items():
+                        result_expr = expr
+                        for noise_var, bound_value in noise_substitutions.items():
+                            result_expr = self.substitute_noise_with_bound(result_expr, noise_var, bound_value)
+                        transforms_subst[state_var] = result_expr
+
+                    I_next = self.substitute_vars(I_expr, transforms_subst)
+
+                    all_vars = state_vars + param_vars
+                    lhs = self.combine_constraints(state_bounds_constraint, param_bounds_constraint, f"(>= {I_expr} 0)")
+                    formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
+                    formulas.append(formula)
+        else:
+            # Standard case: quantify over noise
+            if isinstance(next_state_exprs, list):
+                # Piecewise dynamics
+                for piece in next_state_exprs:
+                    condition = piece['condition']
+                    transforms = piece['transforms']
+                    I_next = self.substitute_vars(I_expr, transforms)
+
+                    all_vars = state_vars + param_vars + noise_vars
+                    lhs = self.combine_constraints(state_bounds_constraint, param_bounds_constraint,
+                                                  noise_bounds_constraint, condition, f"(>= {I_expr} 0)")
+                    formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
+                    formulas.append(formula)
+            else:
+                # Single transform
+                I_next = self.substitute_vars(I_expr, next_state_exprs)
+                all_vars = state_vars + param_vars + noise_vars
+                lhs = self.combine_constraints(state_bounds_constraint, param_bounds_constraint,
+                                              noise_bounds_constraint, f"(>= {I_expr} 0)")
+                formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {I_next} 0)))"
+                formulas.append(formula)
+
+        return formulas
+
+    def generate_formula_v_nonnegative_parametric_simplified(self, state_vars: List[str], param_vars: List[str],
+                                                             state_bounds_constraint: str, param_bounds_constraint: str,
+                                                             I_expr: str, V_expr: str) -> str:
+        """Formula 3 (parametric simplified): V is non-negative on invariant.
+
+        Simplified version that uses parameter bounds instead of Q(P) >= 0.
+        """
+        all_vars = state_vars + param_vars
+        lhs = self.combine_constraints(state_bounds_constraint, param_bounds_constraint, f"(>= {I_expr} 0)")
+        return f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {V_expr} 0)))"
+
+    def generate_formulas_expected_decrease_parametric_simplified(self, state_vars: List[str], param_vars: List[str],
+                                                                  noise_vars: List[str], state_bounds_constraint: str,
+                                                                  param_bounds_constraint: str, target_bounds: List[Tuple[float, float]],
+                                                                  I_expr: str, V_expr: str, epsilon: str,
+                                                                  next_state_exprs: Any, noise_distribution: Dict[str, Any],
+                                                                  v_upper_bound: str = None) -> List[str]:
+        """Formula 5 (parametric simplified): Expected decrease outside target.
+
+        Simplified version that uses parameter bounds instead of Q(P) >= 0.
+        """
+        formulas = []
+        all_vars = state_vars + param_vars
+
+        if isinstance(next_state_exprs, dict):
+            V_next = self.substitute_vars(V_expr, next_state_exprs)
+
+            if noise_vars:
+                E_V_next = self.compute_expected_value(V_next, noise_vars, noise_distribution)
+            else:
+                E_V_next = V_next
+
+            decrease = f"(- {V_expr} {E_V_next})"
+
+            not_target_cases = self.negate_cartesian_bounds(target_bounds, state_vars)
+            for not_target_constraint in not_target_cases:
+                if not self.is_satisfiable_combination(state_bounds_constraint, not_target_constraint):
+                    continue
+
+                lhs_constraints = [state_bounds_constraint, param_bounds_constraint,
+                                  not_target_constraint, f"(>= {I_expr} 0)"]
+                if v_upper_bound:
+                    lhs_constraints.append(f"(<= {V_expr} {v_upper_bound})")
+
+                lhs = self.combine_constraints(*lhs_constraints)
+                formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {decrease} {epsilon})))"
+                formulas.append(formula)
+        else:
+            for piece in next_state_exprs:
+                condition = piece['condition']
+                transforms = piece['transforms']
+                V_next = self.substitute_vars(V_expr, transforms)
+
+                if noise_vars:
+                    E_V_next = self.compute_expected_value(V_next, noise_vars, noise_distribution)
+                else:
+                    E_V_next = V_next
+
+                decrease = f"(- {V_expr} {E_V_next})"
+
+                not_target_cases = self.negate_cartesian_bounds(target_bounds, state_vars)
+
+                for not_target_constraint in not_target_cases:
+                    if not self.is_satisfiable_combination(state_bounds_constraint, condition, not_target_constraint):
+                        continue
+
+                    lhs_constraints = [state_bounds_constraint, param_bounds_constraint,
+                                      condition, not_target_constraint, f"(>= {I_expr} 0)"]
+                    if v_upper_bound:
+                        lhs_constraints.append(f"(<= {V_expr} {v_upper_bound})")
+
+                    lhs = self.combine_constraints(*lhs_constraints)
+                    formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {decrease} {epsilon})))"
+                    formulas.append(formula)
+
+        return formulas
+
+    def generate_formula_initial_value_bound_parametric_simplified(self, state_vars: List[str], param_vars: List[str],
+                                                                   state_bounds_constraint: str, initial_constraint: str,
+                                                                   param_bounds_constraint: str, I_expr: str,
+                                                                   V_expr: str, upper_bound: str) -> str:
+        """Formula 6 (parametric simplified): Initial value of V is bounded.
+
+        Simplified version that uses parameter bounds instead of Q(P) >= 0.
+        """
+        all_vars = state_vars + param_vars
+        lhs = self.combine_constraints(state_bounds_constraint, param_bounds_constraint,
+                                       f"(>= {I_expr} 0)", initial_constraint)
+        return f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (<= {V_expr} {upper_bound})))"
+
+    def generate_formulas_expected_decrease_safety_parametric_simplified(self, state_vars: List[str], param_vars: List[str],
+                                                                         noise_vars: List[str], state_bounds_constraint: str,
+                                                                         param_bounds_constraint: str, I_expr: str,
+                                                                         V_expr: str, next_state_exprs: Any,
+                                                                         noise_distribution: Dict[str, Any],
+                                                                         v_upper_bound: str = None) -> List[str]:
+        """Formula 5 (parametric safety simplified): Expected decrease everywhere (no epsilon, no target check).
+
+        Simplified version that uses parameter bounds instead of Q(P) >= 0.
+        """
+        formulas = []
+        all_vars = state_vars + param_vars
+
+        if isinstance(next_state_exprs, dict):
+            V_next = self.substitute_vars(V_expr, next_state_exprs)
+
+            if noise_vars:
+                E_V_next = self.compute_expected_value(V_next, noise_vars, noise_distribution)
+            else:
+                E_V_next = V_next
+
+            decrease = f"(- {V_expr} {E_V_next})"
+
+            lhs_constraints = [state_bounds_constraint, param_bounds_constraint, f"(>= {I_expr} 0)"]
+            if v_upper_bound:
+                lhs_constraints.append(f"(<= {V_expr} {v_upper_bound})")
+
+            lhs = self.combine_constraints(*lhs_constraints)
+            formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {decrease} 0)))"
+            formulas.append(formula)
+        else:
+            for piece in next_state_exprs:
+                condition = piece['condition']
+                transforms = piece['transforms']
+                V_next = self.substitute_vars(V_expr, transforms)
+
+                if noise_vars:
+                    E_V_next = self.compute_expected_value(V_next, noise_vars, noise_distribution)
+                else:
+                    E_V_next = V_next
+
+                decrease = f"(- {V_expr} {E_V_next})"
+
+                lhs_constraints = [state_bounds_constraint, param_bounds_constraint, condition, f"(>= {I_expr} 0)"]
+                if v_upper_bound:
+                    lhs_constraints.append(f"(<= {V_expr} {v_upper_bound})")
+
+                lhs = self.combine_constraints(*lhs_constraints)
+                formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {decrease} 0)))"
+                formulas.append(formula)
+
+        return formulas
+
+    def generate_formula_unsafe_lower_bound_parametric_simplified(self, state_vars: List[str], param_vars: List[str],
+                                                                  state_bounds_constraint: str, param_bounds_constraint: str,
+                                                                  unsafe_bounds: str, V_expr: str, lower_bound: str) -> str:
+        """Formula for safety (parametric simplified): V is bounded from below in unsafe region.
+
+        Simplified version that uses parameter bounds instead of Q(P) >= 0.
+        """
+        all_vars = state_vars + param_vars
+        lhs = self.combine_constraints(state_bounds_constraint, param_bounds_constraint, unsafe_bounds)
+        return f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {V_expr} {lower_bound})))"
+
+    def generate_formulas_control_bounds_parametric_simplified(self, state_vars: List[str], param_vars: List[str],
+                                                               state_bounds_constraint: str, param_bounds_constraint: str,
+                                                               I_expr: str, control_vars: List[str],
+                                                               controller_exprs: Dict[str, str],
+                                                               control_bounds: List[Tuple[float, float]]) -> List[str]:
+        """Generate control bound formulas (parametric simplified).
+
+        Simplified version that uses parameter bounds instead of Q(P) >= 0.
+        """
+        formulas = []
+
+        for i, control_var in enumerate(control_vars):
+            if control_var not in controller_exprs:
+                continue
+
+            controller = controller_exprs[control_var]
+            u_min, u_max = control_bounds[i]
+
+            all_vars = state_vars + param_vars
+            lhs = self.combine_constraints(state_bounds_constraint, param_bounds_constraint, f"(>= {I_expr} 0)")
+            rhs = f"(and (>= {controller} {u_min}) (<= {controller} {u_max}))"
+
+            formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} {rhs}))"
+            formulas.append(formula)
+
+        return formulas
+
     # ============================================================================
     # MAIN SMT GENERATION FUNCTIONS
     # ============================================================================
@@ -1395,6 +1747,311 @@ class SRSMGenerator:
             formulas.extend(self.generate_formulas_control_bounds_parametric(
                 state_vars, param_vars, state_bounds_constraint, I_expr, Q_expr,
                 control_vars, controller_exprs, control_bounds))
+
+        self._write_smt_file(output_path, formulas)
+        return output_path
+
+    # ============================================================================
+    # SIMPLIFIED SMT GENERATION FUNCTIONS (No Q constraints)
+    # ============================================================================
+
+    def generate_smt_file_quantitative_reach_simplified(self, config: Dict[str, Any],
+                                                        output_path: str = "./tmp/temporary_polyhorn_input.smt2",
+                                                        override_param_bounds: List[Tuple[float, float]] = None):
+        """Generate SMT2 file for quantitative reachability (simplified parametric version).
+
+        This is a simplified version that replaces Q(P) >= 0 constraints with parameter bounds,
+        and does not include the formula asserting Q(P) >= 0 over the entire parameter space.
+
+        Similar to the standard version, but simpler for parameter constraints.
+        """
+        # Check that target_probability is specified
+        if 'target_probability' not in config:
+            raise ValueError("Quantitative reachability requires 'target_probability' in config")
+
+        target_probability = config['target_probability']
+
+        # Special case: if target probability is 1, delegate to standard almost-sure
+        if target_probability == 1:
+            return self.generate_smt_file_almost_sure_reach(config, output_path, override_param_bounds)
+
+        if target_probability <= 0 or target_probability > 1:
+            raise ValueError("Target probability must be in (0, 1]")
+
+        self.validate_config(config)
+
+        degree = config['degree']
+        state_vars = config['system']['state_vars']
+        noise_vars = config['system'].get('noise_vars', [])
+        control_vars = config['system'].get('control_vars', [])
+        param_vars = config['system'].get('param_vars', [])
+        state_bounds = config['system'].get('state_bounds', [])
+
+        if not param_vars:
+            raise ValueError("Simplified parametric version requires parameters (param_vars)")
+
+        param_bounds = None
+        if override_param_bounds is not None:
+            param_bounds = override_param_bounds
+        else:
+            param_bounds = config['system'].get('param_bounds')
+
+        if not param_bounds:
+            raise ValueError("Parameter bounds (param_bounds) required for simplified parametric version")
+
+        # Compute v_upper_bound = 1 / (1 - p)
+        v_upper_bound = str(1.0 / (1.0 - target_probability))
+
+        # Parse target region
+        target_region = config.get('target_region', {})
+        target_bounds_list = target_region.get('bounds', [])
+        target_bounds = self.parse_cartesian_bounds(target_bounds_list, state_vars)
+
+        # Parse initial region
+        initial_region = config['system'].get('initial_region', {})
+        initial_bounds = initial_region.get('bounds', [])
+        initial_constraint = self.parse_cartesian_bounds(initial_bounds, state_vars)
+
+        # State bounds constraint
+        state_bounds_constraint = self.parse_cartesian_bounds(state_bounds, state_vars)
+
+        # Parameter bounds constraint
+        param_bounds_constraint = self.parse_cartesian_bounds(param_bounds, param_vars)
+
+        # Noise bounds
+        noise_distribution = config['system'].get('noise_distribution', {})
+        noise_bounds_constraint = self.get_noise_bounds(noise_vars, noise_distribution)
+
+        # Dynamics
+        next_state_exprs = self.generate_dynamics_expression(config['system']['dynamics'], state_vars, control_vars, noise_vars)
+
+        # Check for param*noise multiplication
+        use_param_noise_bounds = False
+        if param_vars and noise_vars:
+            if isinstance(next_state_exprs, list):
+                for piece in next_state_exprs:
+                    transforms = piece.get('transforms', {})
+                    for expr in transforms.values():
+                        pairs = self.detect_param_noise_multiplication(expr, param_vars, noise_vars)
+                        if pairs:
+                            use_param_noise_bounds = True
+                            break
+                    if use_param_noise_bounds:
+                        break
+            else:
+                for expr in next_state_exprs.values():
+                    pairs = self.detect_param_noise_multiplication(expr, param_vars, noise_vars)
+                    if pairs:
+                        use_param_noise_bounds = True
+                        break
+
+        # Declare symbolic constants
+        V_expr = self.generate_polynomial_template(state_vars, degree, "V")
+        I_expr = self.generate_polynomial_template(state_vars, degree, "I")
+
+        controller_exprs = {}
+        if control_vars:
+            for control_var in control_vars:
+                controller_exprs[control_var] = self.generate_polynomial_template(state_vars, degree, "C")
+
+        epsilon = self.new_constant("Epsilon")
+
+        # Substitute control variables with controller expressions
+        if control_vars:
+            if isinstance(next_state_exprs, dict):
+                for var in next_state_exprs:
+                    next_state_exprs[var] = self.substitute_control(next_state_exprs[var], control_vars, controller_exprs)
+            else:
+                for piece in next_state_exprs:
+                    for var in piece['transforms']:
+                        piece['transforms'][var] = self.substitute_control(piece['transforms'][var], control_vars, controller_exprs)
+
+        formulas = []
+
+        # Formula 1: Initial states satisfy invariant
+        formulas.append(self.generate_formula_initial_invariant_parametric_simplified(
+            state_vars, param_vars, state_bounds_constraint, initial_constraint,
+            param_bounds_constraint, I_expr))
+
+        # Formula 2: Invariant preservation
+        formulas.extend(self.generate_formulas_invariant_preservation_parametric_simplified(
+            state_vars, param_vars, noise_vars, state_bounds_constraint,
+            param_bounds_constraint, noise_bounds_constraint, I_expr, next_state_exprs,
+            noise_distribution, use_param_noise_bounds))
+
+        # Formula 3: V is non-negative on invariant
+        formulas.append(self.generate_formula_v_nonnegative_parametric_simplified(
+            state_vars, param_vars, state_bounds_constraint, param_bounds_constraint, I_expr, V_expr))
+
+        # Epsilon is positive
+        formulas.append(self.generate_formula_epsilon_positive(epsilon))
+
+        # Formula 4/5: Expected decrease
+        formulas.extend(self.generate_formulas_expected_decrease_parametric_simplified(
+            state_vars, param_vars, noise_vars, state_bounds_constraint,
+            param_bounds_constraint, target_bounds_list, I_expr, V_expr, epsilon, next_state_exprs,
+            noise_distribution, v_upper_bound))
+
+        # Formula 6: Initial value bound V(S) <= 1
+        formulas.append(self.generate_formula_initial_value_bound_parametric_simplified(
+            state_vars, param_vars, state_bounds_constraint, initial_constraint,
+            param_bounds_constraint, I_expr, V_expr, "1"))
+
+        # Control bounds (if applicable)
+        if control_vars:
+            control_bounds_list = config['system'].get('control_bounds', [])
+            formulas.extend(self.generate_formulas_control_bounds_parametric_simplified(
+                state_vars, param_vars, state_bounds_constraint, param_bounds_constraint,
+                I_expr, control_vars, controller_exprs, control_bounds_list))
+
+        # Note: No Q(P) >= 0 formula in simplified version
+
+        self._write_smt_file(output_path, formulas)
+        return output_path
+
+    def generate_smt_file_quantitative_safety_simplified(self, config: Dict[str, Any],
+                                                         output_path: str = "./tmp/temporary_polyhorn_input.smt2",
+                                                         override_param_bounds: List[Tuple[float, float]] = None):
+        """Generate SMT2 file for quantitative safety (simplified parametric version).
+
+        This is a simplified version that replaces Q(P) >= 0 constraints with parameter bounds,
+        and does not include the formula asserting Q(P) >= 0 over the entire parameter space.
+        """
+        if 'target_probability' not in config:
+            raise ValueError("Quantitative safety requires 'target_probability' in config")
+
+        target_probability = config['target_probability']
+
+        if target_probability <= 0 or target_probability >= 1:
+            raise ValueError("Target probability must be in (0, 1) for quantitative safety")
+
+        self.validate_config(config)
+
+        degree = config['degree']
+        state_vars = config['system']['state_vars']
+        noise_vars = config['system'].get('noise_vars', [])
+        control_vars = config['system'].get('control_vars', [])
+        param_vars = config['system'].get('param_vars', [])
+        state_bounds = config['system'].get('state_bounds', [])
+
+        if not param_vars:
+            raise ValueError("Simplified parametric version requires parameters (param_vars)")
+
+        param_bounds = None
+        if override_param_bounds is not None:
+            param_bounds = override_param_bounds
+        else:
+            param_bounds = config['system'].get('param_bounds')
+
+        if not param_bounds:
+            raise ValueError("Parameter bounds (param_bounds) required for simplified parametric version")
+
+        # Compute v_lower_bound = 1 / (1 - p)
+        v_lower_bound = str(1.0 / (1.0 - target_probability))
+
+        # Parse unsafe region
+        unsafe_region = config.get('unsafe_region', {})
+        unsafe_bounds_list = unsafe_region.get('bounds', [])
+        unsafe_bounds = self.parse_cartesian_bounds(unsafe_bounds_list, state_vars)
+
+        # Parse initial region
+        initial_region = config['system'].get('initial_region', {})
+        initial_bounds = initial_region.get('bounds', [])
+        initial_constraint = self.parse_cartesian_bounds(initial_bounds, state_vars)
+
+        # State bounds constraint
+        state_bounds_constraint = self.parse_cartesian_bounds(state_bounds, state_vars)
+
+        # Parameter bounds constraint
+        param_bounds_constraint = self.parse_cartesian_bounds(param_bounds, param_vars)
+
+        # Noise bounds
+        noise_distribution = config['system'].get('noise_distribution', {})
+        noise_bounds_constraint = self.get_noise_bounds(noise_vars, noise_distribution)
+
+        # Dynamics
+        next_state_exprs = self.generate_dynamics_expression(config['system']['dynamics'], state_vars, control_vars, noise_vars)
+
+        # Check for param*noise multiplication
+        use_param_noise_bounds = False
+        if param_vars and noise_vars:
+            if isinstance(next_state_exprs, list):
+                for piece in next_state_exprs:
+                    transforms = piece.get('transforms', {})
+                    for expr in transforms.values():
+                        pairs = self.detect_param_noise_multiplication(expr, param_vars, noise_vars)
+                        if pairs:
+                            use_param_noise_bounds = True
+                            break
+                    if use_param_noise_bounds:
+                        break
+            else:
+                for expr in next_state_exprs.values():
+                    pairs = self.detect_param_noise_multiplication(expr, param_vars, noise_vars)
+                    if pairs:
+                        use_param_noise_bounds = True
+                        break
+
+        # Declare symbolic constants
+        V_expr = self.generate_polynomial_template(state_vars, degree, "V")
+        I_expr = self.generate_polynomial_template(state_vars, degree, "I")
+
+        controller_exprs = {}
+        if control_vars:
+            for control_var in control_vars:
+                controller_exprs[control_var] = self.generate_polynomial_template(state_vars, degree, "C")
+
+        # Substitute control variables with controller expressions
+        if control_vars:
+            if isinstance(next_state_exprs, dict):
+                for var in next_state_exprs:
+                    next_state_exprs[var] = self.substitute_control(next_state_exprs[var], control_vars, controller_exprs)
+            else:
+                for piece in next_state_exprs:
+                    for var in piece['transforms']:
+                        piece['transforms'][var] = self.substitute_control(piece['transforms'][var], control_vars, controller_exprs)
+
+        formulas = []
+
+        # Formula 1: Initial states satisfy invariant
+        formulas.append(self.generate_formula_initial_invariant_parametric_simplified(
+            state_vars, param_vars, state_bounds_constraint, initial_constraint,
+            param_bounds_constraint, I_expr))
+
+        # Formula 2: Invariant preservation
+        formulas.extend(self.generate_formulas_invariant_preservation_parametric_simplified(
+            state_vars, param_vars, noise_vars, state_bounds_constraint,
+            param_bounds_constraint, noise_bounds_constraint, I_expr, next_state_exprs,
+            noise_distribution, use_param_noise_bounds))
+
+        # Formula 3: V is non-negative on invariant
+        formulas.append(self.generate_formula_v_nonnegative_parametric_simplified(
+            state_vars, param_vars, state_bounds_constraint, param_bounds_constraint, I_expr, V_expr))
+
+        # Formula 4: V is bounded by 1 on initial states
+        formulas.append(self.generate_formula_initial_value_bound_parametric_simplified(
+            state_vars, param_vars, state_bounds_constraint, initial_constraint,
+            param_bounds_constraint, I_expr, V_expr, "1"))
+
+        # Formula 5: Expected decrease everywhere (no target check, no epsilon)
+        formulas.extend(self.generate_formulas_expected_decrease_safety_parametric_simplified(
+            state_vars, param_vars, noise_vars, state_bounds_constraint,
+            param_bounds_constraint, I_expr, V_expr, next_state_exprs,
+            noise_distribution, v_upper_bound=None))
+
+        # Formula 6: V >= 1/(1-p) in unsafe region
+        formulas.append(self.generate_formula_unsafe_lower_bound_parametric_simplified(
+            state_vars, param_vars, state_bounds_constraint, param_bounds_constraint,
+            unsafe_bounds, V_expr, v_lower_bound))
+
+        # Control bounds (if applicable)
+        if control_vars:
+            control_bounds_list = config['system'].get('control_bounds', [])
+            formulas.extend(self.generate_formulas_control_bounds_parametric_simplified(
+                state_vars, param_vars, state_bounds_constraint, param_bounds_constraint,
+                I_expr, control_vars, controller_exprs, control_bounds_list))
+
+        # Note: No Q(P) >= 0 formula in simplified version
 
         self._write_smt_file(output_path, formulas)
         return output_path

@@ -35,7 +35,7 @@
   },
   "enable_param_refinement": true,
   "param_refinement_threshold": 0.1,
-  "target_probability": 1,
+  "target_probability": 0.99,
   "degree": 1,
   "smt_solver": "z3",
   "entailment_solver": "farkas",

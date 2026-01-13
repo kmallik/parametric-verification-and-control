@@ -498,7 +498,17 @@ class SRSMGenerator:
         """Formula 6 (reachability): Initial value of V is bounded."""
         lhs = self.combine_constraints(state_bounds_constraint, f"(>= {I_expr} 0)", initial_constraint)
         return f"(forall ({self.format_var_decls(state_vars)}) (=> {lhs} (<= {V_expr} {upper_bound})))"
-    
+
+    def generate_formula_initial_value_bound_parametric(self, state_vars: List[str], param_vars: List[str],
+                                                        state_bounds_constraint: str, initial_constraint: str,
+                                                        I_expr: str, V_expr: str, Q_expr: str,
+                                                        upper_bound: str) -> str:
+        """Formula 6 (parametric reachability): Initial value of V is bounded."""
+        all_vars = state_vars + param_vars
+        lhs = self.combine_constraints(state_bounds_constraint, f"(>= {I_expr} 0)",
+                                       initial_constraint, f"(>= {Q_expr} 0)")
+        return f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (<= {V_expr} {upper_bound})))"
+
     def generate_formulas_control_bounds(self, state_vars: List[str], state_bounds_constraint: str,
                                         I_expr: str, control_vars: List[str], 
                                         controller_exprs: Dict[str, str],
@@ -888,6 +898,16 @@ class SRSMGenerator:
                 state_vars, state_bounds_constraint, I_expr, V_expr))
 
         formulas.append(self.generate_formula_epsilon_positive(epsilon))
+
+        # Additional formula for quantitative reachability: V is bounded by 1 on initial states
+        if is_parametric:
+            formulas.append(self.generate_formula_initial_value_bound_parametric(
+                state_vars, param_vars, state_bounds_constraint, initial_constraint,
+                I_expr, V_expr, Q_expr, "1"))
+        else:
+            formulas.append(self.generate_formula_initial_value_bound(
+                state_vars, state_bounds_constraint, initial_constraint,
+                I_expr, V_expr, "1"))
 
         # The key difference: include v_upper_bound in expected decrease formulas
         if is_parametric:

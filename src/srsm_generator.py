@@ -1414,8 +1414,19 @@ class SRSMGenerator:
             f.write("(get-model)\n")
 
     def generate_config_file(self, theorem_name: str, degree: int, solver_name: str,
-                           smt_output_path: str = "./tmp/temporary_polyhorn_input.smt2"):
-        """Generate configuration JSON file."""
+                           smt_output_path: str = "./tmp/temporary_polyhorn_input.smt2",
+                           config_path: str = "./tmp/temporary_polyhorn_config.json",
+                           temp_output_path: str = "./tmp/polyhorn_temp.txt"):
+        """Generate configuration JSON file.
+
+        Args:
+            theorem_name: Name of the theorem/entailment solver
+            degree: Polynomial degree
+            solver_name: SMT solver name
+            smt_output_path: Path to SMT file (not used in config, for reference)
+            config_path: Path where to write the config JSON file
+            temp_output_path: Path for temporary output file used by PolyQnt solver
+        """
         config = {
             "theorem_name": theorem_name,
             "degree_of_sat": degree,
@@ -1423,13 +1434,12 @@ class SRSMGenerator:
             "degree_of_strict_unsat": 0,
             "max_d_of_strict": 0,
             "solver_name": solver_name,
-            "output_path": "./tmp/polyhorn_temp.txt",
+            "output_path": temp_output_path,
             "unsat_core_heuristic": False,
             "SAT_heuristic": True,
             "integer_arithmetic": False
         }
 
-        config_path = "./tmp/temporary_polyhorn_config.json"
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=2)
 

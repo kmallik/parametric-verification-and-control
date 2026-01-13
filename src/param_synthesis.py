@@ -1,8 +1,15 @@
 import json
 import sys
+import os
+import threading
 from typing import List, Dict, Any, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from polyqent.main import execute
 from srsm_generator import SRSMGenerator
+
+# Thread-safe counter for unique file naming
+_file_counter = 0
+_file_counter_lock = threading.Lock()
 
 def load_config(filepath: str) -> Dict[str, Any]:
     """Load configuration from JSON file."""
@@ -10,9 +17,19 @@ def load_config(filepath: str) -> Dict[str, Any]:
         return json.load(f)
 
 
-def refine_parameter_space(config: Dict[str, Any], entailment_solver: str, 
-                          degree: int, smt_solver: str, threshold: float = 0.01) -> List[Dict]:
-    """Iteratively refine parameter space to find all SAT regions."""
+def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
+                          degree: int, smt_solver: str, threshold: float = 0.01,
+                          parallel: bool = False) -> List[Dict]:
+    """Iteratively refine parameter space to find all SAT regions.
+
+    Args:
+        config: Configuration dictionary
+        entailment_solver: Solver for entailment checking
+        degree: Polynomial degree
+        smt_solver: SMT solver to use
+        threshold: Refinement threshold
+        parallel: If True, explore children in parallel; if False, use serial exploration
+    """
     
     if 'param_bounds' not in config['system']:
         raise ValueError("Parameter space refinement requires 'param_bounds'")
@@ -22,7 +39,14 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
     
     if not param_vars:
         raise ValueError("No parameter variables specified")
-    
+
+    # Create tmp directory if it doesn't exist
+    os.makedirs('./tmp', exist_ok=True)
+
+    # Reset file counter for clean state
+    global _file_counter
+    _file_counter = 0
+
     print(f"\n{'='*80}")
     print(f"PARAMETER SPACE REFINEMENT")
     print(f"{'='*80}")
@@ -46,6 +70,13 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         
         return left_bounds, right_bounds
     
+    def get_unique_file_id() -> int:
+        """Get a unique file ID for thread-safe file naming."""
+        global _file_counter
+        with _file_counter_lock:
+            _file_counter += 1
+            return _file_counter
+
     def explore_region(current_bounds: List[Tuple[float, float]], depth: int = 0) -> List[Dict]:
         """Recursively explore parameter region."""
         indent = "  " * depth
@@ -54,7 +85,12 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         print(f"{indent}Exploring region: {current_bounds} (width: {width:.6f})")
 
         generator = SRSMGenerator()
-        output_path = f"./tmp/temporary_polyhorn_input_depth{depth}.smt2"
+
+        # Use unique file ID to avoid race conditions in parallel mode
+        file_id = get_unique_file_id()
+        output_path = f"./tmp/temporary_polyhorn_input_id{file_id}.smt2"
+        config_path = f"./tmp/temporary_polyhorn_config_id{file_id}.json"
+        temp_output_path = f"./tmp/polyhorn_temp_id{file_id}.txt"
 
         has_target = 'target_region' in config
         has_unsafe = 'unsafe_region' in config
@@ -76,8 +112,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         else:
             raise ValueError("Must specify either 'target_region' or 'unsafe_region', but not both")
 
-        config_path = f"./tmp/temporary_polyhorn_config_depth{depth}.json"
-        generator.generate_config_file(entailment_solver, degree, smt_solver, output_path)
+        generator.generate_config_file(entailment_solver, degree, smt_solver, output_path, config_path, temp_output_path)
         
         print(f"{indent}Running PolyQnt solver...")
         try:
@@ -98,17 +133,28 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         
         else:
             print(f"{indent}Splitting region...")
-            max_dim = max(range(len(current_bounds)), 
+            max_dim = max(range(len(current_bounds)),
                          key=lambda d: current_bounds[d][1] - current_bounds[d][0])
-            
+
             left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
-            
-            print(f"{indent}Exploring left child...")
-            left_models = explore_region(left_bounds, depth + 1)
-            
-            print(f"{indent}Exploring right child...")
-            right_models = explore_region(right_bounds, depth + 1)
-            
+
+            if parallel:
+                # Explore both children in parallel
+                print(f"{indent}Exploring both children in parallel...")
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    left_future = executor.submit(explore_region, left_bounds, depth + 1)
+                    right_future = executor.submit(explore_region, right_bounds, depth + 1)
+
+                    left_models = left_future.result()
+                    right_models = right_future.result()
+            else:
+                # Serial exploration
+                print(f"{indent}Exploring left child...")
+                left_models = explore_region(left_bounds, depth + 1)
+
+                print(f"{indent}Exploring right child...")
+                right_models = explore_region(right_bounds, depth + 1)
+
             return left_models + right_models
     
     models = explore_region(initial_param_bounds)
@@ -144,7 +190,12 @@ def main():
     if param_vars and 'param_bounds' in config['system'] and enable_refinement:
         print("Parameter space refinement enabled.")
         threshold = config.get('param_refinement_threshold', 0.01)
-        models = refine_parameter_space(config, entailment_solver, degree, smt_solver, threshold)
+        parallel = config.get('parallel_refinement', False)
+        if parallel:
+            print("Using parallel refinement mode.")
+        else:
+            print("Using serial refinement mode.")
+        models = refine_parameter_space(config, entailment_solver, degree, smt_solver, threshold, parallel)
         
         print(f"\n{'='*80}")
         print("FINAL SUMMARY")
@@ -160,6 +211,9 @@ def main():
         return models
     
     else:
+        # Create tmp directory if it doesn't exist
+        os.makedirs('./tmp', exist_ok=True)
+
         generator = SRSMGenerator()
 
         has_target = 'target_region' in config

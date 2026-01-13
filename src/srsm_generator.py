@@ -642,6 +642,64 @@ class SRSMGenerator:
         
         return formulas
     
+    def generate_formulas_expected_decrease_safety_parametric(self, state_vars: List[str], param_vars: List[str],
+                                                               noise_vars: List[str], state_bounds_constraint: str,
+                                                               I_expr: str, V_expr: str, Q_expr: str,
+                                                               next_state_exprs: Any, noise_distribution: Dict[str, Any],
+                                                               v_upper_bound: str = None) -> List[str]:
+        """Formula 5 (parametric safety): Expected decrease everywhere (no epsilon, no target check)."""
+        formulas = []
+        all_vars = state_vars + param_vars
+
+        if isinstance(next_state_exprs, dict):
+            V_next = self.substitute_vars(V_expr, next_state_exprs)
+
+            if noise_vars:
+                E_V_next = self.compute_expected_value(V_next, noise_vars, noise_distribution)
+            else:
+                E_V_next = V_next
+
+            decrease = f"(- {V_expr} {E_V_next})"
+
+            lhs_constraints = [state_bounds_constraint, f"(>= {Q_expr} 0)", f"(>= {I_expr} 0)"]
+            if v_upper_bound:
+                lhs_constraints.append(f"(<= {V_expr} {v_upper_bound})")
+
+            lhs = self.combine_constraints(*lhs_constraints)
+            formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {decrease} 0)))"
+            formulas.append(formula)
+        else:
+            for piece in next_state_exprs:
+                condition = piece['condition']
+                transforms = piece['transforms']
+                V_next = self.substitute_vars(V_expr, transforms)
+
+                if noise_vars:
+                    E_V_next = self.compute_expected_value(V_next, noise_vars, noise_distribution)
+                else:
+                    E_V_next = V_next
+
+                decrease = f"(- {V_expr} {E_V_next})"
+
+                lhs_constraints = [state_bounds_constraint, f"(>= {Q_expr} 0)", condition, f"(>= {I_expr} 0)"]
+                if v_upper_bound:
+                    lhs_constraints.append(f"(<= {V_expr} {v_upper_bound})")
+
+                lhs = self.combine_constraints(*lhs_constraints)
+                formula = f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {decrease} 0)))"
+                formulas.append(formula)
+
+        return formulas
+
+    def generate_formula_unsafe_lower_bound_parametric(self, state_vars: List[str], param_vars: List[str],
+                                                        state_bounds_constraint: str, unsafe_bounds: List[Tuple[float, float]],
+                                                        V_expr: str, Q_expr: str, lower_bound: str) -> str:
+        """Formula for quantitative safety: V >= lower_bound in unsafe region."""
+        all_vars = state_vars + param_vars
+        unsafe_constraint = self.parse_cartesian_bounds(unsafe_bounds, state_vars)
+        lhs = self.combine_constraints(state_bounds_constraint, unsafe_constraint, f"(>= {Q_expr} 0)")
+        return f"(forall ({self.format_var_decls(all_vars)}) (=> {lhs} (>= {V_expr} {lower_bound})))"
+
     def generate_formula_q_positive(self, param_vars: List[str], Q_expr: str,
                                    param_bounds: List[Tuple[float, float]] = None,
                                    param_vals: List[float] = None) -> str:
@@ -931,6 +989,133 @@ class SRSMGenerator:
             else:
                 formulas.extend(self.generate_formulas_control_bounds(
                     state_vars, state_bounds_constraint, I_expr, control_vars, controller_exprs, control_bounds))
+
+        self._write_smt_file(output_path, formulas)
+        return output_path
+
+    def generate_smt_file_quantitative_safety(self, config: Dict[str, Any],
+                                              output_path: str = "./tmp/temporary_polyhorn_input.smt2",
+                                              override_param_bounds: List[Tuple[float, float]] = None):
+        """Generate SMT2 file for quantitative safety (parametric systems only).
+
+        For safety specifications with unsafe_region and target_probability < 1.
+        Key differences from reachability:
+        - No epsilon constant
+        - Expected decrease everywhere (no target region check)
+        - V >= 1/(1-p) in unsafe region
+        """
+        # Validate this is a safety specification
+        if 'unsafe_region' not in config:
+            raise ValueError("Quantitative safety requires 'unsafe_region' in config")
+        if 'target_region' in config:
+            raise ValueError("Quantitative safety should not have 'target_region' (use quantitative reachability instead)")
+
+        # Check that target_probability is specified and < 1
+        if 'target_probability' not in config:
+            raise ValueError("Quantitative safety requires 'target_probability' in config")
+
+        target_probability = config['target_probability']
+        if target_probability >= 1:
+            raise ValueError("Quantitative safety requires target_probability < 1 (use qualitative safety for probability = 1)")
+        if target_probability <= 0:
+            raise ValueError("Target probability must be in (0, 1)")
+
+        self.validate_config(config)
+
+        degree = config['degree']
+        state_vars = config['system']['state_vars']
+        noise_vars = config['system'].get('noise_vars', [])
+        control_vars = config['system'].get('control_vars', [])
+        param_vars = config['system'].get('param_vars', [])
+        state_bounds = config['system'].get('state_bounds', [])
+
+        # Only parametric systems supported
+        if not param_vars:
+            raise ValueError("Quantitative safety currently only supports parametric systems")
+
+        is_parametric = True
+
+        param_bounds = None
+        param_vals = None
+
+        if override_param_bounds is not None:
+            param_bounds = override_param_bounds
+        elif 'param_bounds' in config['system']:
+            param_bounds = config['system']['param_bounds']
+        elif 'param_vals' in config['system']:
+            param_vals = config['system']['param_vals']
+        else:
+            raise ValueError("Parametric system requires 'param_bounds' or 'param_vals'")
+
+        V_expr = self.generate_polynomial_template(state_vars, degree, "V")
+        I_expr = self.generate_polynomial_template(state_vars, degree, "I")
+        Q_expr = self.generate_polynomial_template(param_vars, degree, "Q")
+
+        controller_exprs = {}
+        if control_vars:
+            for control_var in control_vars:
+                controller_exprs[control_var] = self.generate_polynomial_template(state_vars, degree, "C")
+
+        # No epsilon for safety
+        # Compute V lower bound from target probability: 1/(1-p)
+        v_lower_bound = str(1.0 / (1.0 - target_probability))
+
+        state_bounds_constraint = self.parse_cartesian_bounds(state_bounds, state_vars) if state_bounds else None
+        noise_bounds_constraint = self.get_noise_bounds(noise_vars, config['system'].get('noise_distribution', {}))
+        initial_constraint = self.parse_region(config['system']['initial_region'], state_vars)
+        unsafe_bounds = config['unsafe_region']['bounds']
+
+        next_state_exprs = self.generate_dynamics_expression(config['system']['dynamics'], state_vars, control_vars, noise_vars)
+
+        if control_vars:
+            if isinstance(next_state_exprs, dict):
+                for var in next_state_exprs:
+                    next_state_exprs[var] = self.substitute_control(next_state_exprs[var], control_vars, controller_exprs)
+            else:
+                for piece in next_state_exprs:
+                    for var in piece['transforms']:
+                        piece['transforms'][var] = self.substitute_control(piece['transforms'][var], control_vars, controller_exprs)
+
+        formulas = []
+
+        # Formula 1: Initial states satisfy invariant
+        formulas.append(self.generate_formula_initial_invariant_parametric(
+            state_vars, param_vars, state_bounds_constraint, initial_constraint, I_expr, Q_expr))
+
+        # Formula 2: Invariant is preserved
+        formulas.extend(self.generate_formulas_invariant_preservation_parametric(
+            state_vars, param_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint,
+            I_expr, Q_expr, next_state_exprs))
+
+        # Formula 3: V is non-negative on invariant
+        formulas.append(self.generate_formula_v_nonnegative_parametric(
+            state_vars, param_vars, state_bounds_constraint, I_expr, V_expr, Q_expr))
+
+        # Formula 4: V is bounded by 1 on initial states
+        formulas.append(self.generate_formula_initial_value_bound_parametric(
+            state_vars, param_vars, state_bounds_constraint, initial_constraint,
+            I_expr, V_expr, Q_expr, "1"))
+
+        # Formula 5: Expected decrease everywhere (no epsilon, no target check)
+        formulas.extend(self.generate_formulas_expected_decrease_safety_parametric(
+            state_vars, param_vars, noise_vars, state_bounds_constraint,
+            I_expr, V_expr, Q_expr, next_state_exprs,
+            config['system'].get('noise_distribution', {}), v_upper_bound=None))
+
+        # Formula 6: V >= 1/(1-p) in unsafe region
+        formulas.append(self.generate_formula_unsafe_lower_bound_parametric(
+            state_vars, param_vars, state_bounds_constraint, unsafe_bounds,
+            V_expr, Q_expr, v_lower_bound))
+
+        # Formula 7: Q is positive
+        formulas.append(self.generate_formula_q_positive(param_vars, Q_expr, param_bounds, param_vals))
+
+        # Control bounds if applicable
+        if control_vars:
+            control_bounds = config['system']['control_bounds']
+            formulas.extend(self.generate_formulas_control_bounds_parametric(
+                state_vars, param_vars, state_bounds_constraint, I_expr, Q_expr,
+                control_vars, controller_exprs, control_bounds))
 
         self._write_smt_file(output_path, formulas)
         return output_path

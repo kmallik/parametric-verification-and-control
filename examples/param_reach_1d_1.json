@@ -18,7 +18,7 @@
       },
       {
         "condition": "0 <= S1 <= 100",
-        "transforms": {"S1": "(+ S1 (+ W1 (+ U1 P1)))"}
+        "transforms": {"S1": "(+ S1 (+ U1 (+ W1 P1)))"}
       },
       {
         "condition": "S1 >= 100",

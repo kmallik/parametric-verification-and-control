@@ -1,5 +1,4 @@
 import json
-import sys
 import re
 from typing import List, Dict, Any, Tuple
 from polyqent.main import execute
@@ -790,20 +789,146 @@ class SRSMGenerator:
         self._write_smt_file(output_path, formulas)
         return output_path
     
+    def generate_smt_file_quantitative_reach(self, config: Dict[str, Any],
+                                             output_path: str = "./tmp/temporary_polyhorn_input.smt2",
+                                             override_param_bounds: List[Tuple[float, float]] = None):
+        """Generate SMT2 file for quantitative reachability.
+
+        Similar to almost-sure reachability, but the expected decrease condition includes
+        an additional constraint: V(x) <= 1/(1-p), where p is the target probability.
+
+        If target_probability is 1, delegates to generate_smt_file_almost_sure_reach.
+        """
+        # Check that target_probability is specified
+        if 'target_probability' not in config:
+            raise ValueError("Quantitative reachability requires 'target_probability' in config")
+
+        target_probability = config['target_probability']
+
+        # Special case: if target probability is 1, use almost-sure reachability
+        if target_probability == 1:
+            return self.generate_smt_file_almost_sure_reach(config, output_path, override_param_bounds)
+
+        if target_probability <= 0 or target_probability > 1:
+            raise ValueError("Target probability must be in (0, 1]")
+
+        self.validate_config(config)
+
+        degree = config['degree']
+        state_vars = config['system']['state_vars']
+        noise_vars = config['system'].get('noise_vars', [])
+        control_vars = config['system'].get('control_vars', [])
+        param_vars = config['system'].get('param_vars', [])
+        state_bounds = config['system'].get('state_bounds', [])
+
+        is_parametric = len(param_vars) > 0
+
+        param_bounds = None
+        param_vals = None
+
+        if is_parametric:
+            if override_param_bounds is not None:
+                param_bounds = override_param_bounds
+            elif 'param_bounds' in config['system']:
+                param_bounds = config['system']['param_bounds']
+            elif 'param_vals' in config['system']:
+                param_vals = config['system']['param_vals']
+            else:
+                raise ValueError("Parametric system requires 'param_bounds' or 'param_vals'")
+
+        V_expr = self.generate_polynomial_template(state_vars, degree, "V")
+        I_expr = self.generate_polynomial_template(state_vars, degree, "I")
+
+        Q_expr = None
+        if is_parametric:
+            Q_expr = self.generate_polynomial_template(param_vars, degree, "Q")
+
+        controller_exprs = {}
+        if control_vars:
+            for control_var in control_vars:
+                controller_exprs[control_var] = self.generate_polynomial_template(state_vars, degree, "C")
+
+        epsilon = self.new_constant("Epsilon")
+
+        # Compute V upper bound from target probability: 1/(1-p)
+        v_upper_bound = str(1.0 / (1.0 - target_probability))
+
+        state_bounds_constraint = self.parse_cartesian_bounds(state_bounds, state_vars) if state_bounds else None
+        noise_bounds_constraint = self.get_noise_bounds(noise_vars, config['system'].get('noise_distribution', {}))
+        initial_constraint = self.parse_region(config['system']['initial_region'], state_vars)
+        target_bounds = config['target_region']['bounds']
+
+        next_state_exprs = self.generate_dynamics_expression(config['system']['dynamics'], state_vars, control_vars, noise_vars)
+
+        if control_vars:
+            if isinstance(next_state_exprs, dict):
+                for var in next_state_exprs:
+                    next_state_exprs[var] = self.substitute_control(next_state_exprs[var], control_vars, controller_exprs)
+            else:
+                for piece in next_state_exprs:
+                    for var in piece['transforms']:
+                        piece['transforms'][var] = self.substitute_control(piece['transforms'][var], control_vars, controller_exprs)
+
+        formulas = []
+
+        if is_parametric:
+            formulas.append(self.generate_formula_initial_invariant_parametric(
+                state_vars, param_vars, state_bounds_constraint, initial_constraint, I_expr, Q_expr))
+            formulas.extend(self.generate_formulas_invariant_preservation_parametric(
+                state_vars, param_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint,
+                I_expr, Q_expr, next_state_exprs))
+            formulas.append(self.generate_formula_v_nonnegative_parametric(
+                state_vars, param_vars, state_bounds_constraint, I_expr, V_expr, Q_expr))
+        else:
+            formulas.append(self.generate_formula_initial_invariant(
+                state_vars, state_bounds_constraint, initial_constraint, I_expr))
+            formulas.extend(self.generate_formulas_invariant_preservation(
+                state_vars, noise_vars, state_bounds_constraint, noise_bounds_constraint, I_expr, next_state_exprs))
+            formulas.append(self.generate_formula_v_nonnegative(
+                state_vars, state_bounds_constraint, I_expr, V_expr))
+
+        formulas.append(self.generate_formula_epsilon_positive(epsilon))
+
+        # The key difference: include v_upper_bound in expected decrease formulas
+        if is_parametric:
+            formulas.extend(self.generate_formulas_expected_decrease_parametric(
+                state_vars, param_vars, noise_vars, state_bounds_constraint, target_bounds,
+                I_expr, V_expr, Q_expr, epsilon, next_state_exprs,
+                config['system'].get('noise_distribution', {}), v_upper_bound=v_upper_bound))
+            formulas.append(self.generate_formula_q_positive(param_vars, Q_expr, param_bounds, param_vals))
+        else:
+            formulas.extend(self.generate_formulas_expected_decrease(
+                state_vars, noise_vars, state_bounds_constraint, target_bounds,
+                I_expr, V_expr, epsilon, next_state_exprs,
+                config['system'].get('noise_distribution', {}), v_upper_bound=v_upper_bound))
+
+        if control_vars:
+            control_bounds = config['system']['control_bounds']
+            if is_parametric:
+                formulas.extend(self.generate_formulas_control_bounds_parametric(
+                    state_vars, param_vars, state_bounds_constraint, I_expr, Q_expr,
+                    control_vars, controller_exprs, control_bounds))
+            else:
+                formulas.extend(self.generate_formulas_control_bounds(
+                    state_vars, state_bounds_constraint, I_expr, control_vars, controller_exprs, control_bounds))
+
+        self._write_smt_file(output_path, formulas)
+        return output_path
+
     def _write_smt_file(self, output_path: str, formulas: List[str]):
         """Write formulas to SMT2 file."""
         with open(output_path, 'w') as f:
             for const in self.constants:
                 f.write(f"(declare-const {const} Real)\n")
             f.write("\n")
-            
+
             for formula in formulas:
                 f.write(f"(assert {formula})\n")
             f.write("\n")
-            
+
             f.write("(check-sat)\n")
             f.write("(get-model)\n")
-    
+
     def generate_config_file(self, theorem_name: str, degree: int, solver_name: str,
                            smt_output_path: str = "./tmp/temporary_polyhorn_input.smt2"):
         """Generate configuration JSON file."""
@@ -819,9 +944,9 @@ class SRSMGenerator:
             "SAT_heuristic": True,
             "integer_arithmetic": False
         }
-        
+
         config_path = "./tmp/temporary_polyhorn_config.json"
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=2)
-        
+
         return config_path

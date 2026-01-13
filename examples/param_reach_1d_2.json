@@ -4,17 +4,24 @@
     "state_vars": ["S1", "S2"],
     "param_vars": ["P1", "P2", "P3"],
     "noise_vars": ["W1"],
-    "state_bounds": [[-10, 10], [0, 1]],
-    "param_bounds": [[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]],
+    "state_bounds": [[-10, 10], [-1, 2]],
+    "param_bounds": [[-1.0, 1.0], [-1.0, 1.0], [-1.0, 1.0]],
     "initial_region": {
       "bounds": [[0.0, 1.0], [0.999, 1.111]]
     },
     "dynamics": [
       {
-        "condition": "-10 <= S1 <= 10",
+        "condition": "S2 >= -0.5",
         "transforms": {
-          "S1": "(+ P1 (+ (* P2 S2) (* P3 W1)))",
+          "S1": "(+ P1 (+ (* P2 S1) (* P3 W1)))",
           "S2": "(+ S2 -1)"
+        }
+      },
+      {
+        "condition": "S2 <= -0.5",
+        "transforms": {
+          "S1": "(+ S1 0)",
+          "S2": "(+ S2 0)"
         }
       }
     ],
@@ -28,7 +35,7 @@
   },
   "enable_param_refinement": true,
   "param_refinement_threshold": 0.1,
-  "target_probability": 0.75,
+  "target_probability": 1.0,
   "degree": 1,
   "smt_solver": "z3",
   "entailment_solver": "farkas",

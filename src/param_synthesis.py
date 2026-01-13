@@ -50,14 +50,19 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         """Recursively explore parameter region."""
         indent = "  " * depth
         width = compute_width(current_bounds)
-        
+
         print(f"{indent}Exploring region: {current_bounds} (width: {width:.6f})")
-        
+
         generator = SRSMGenerator()
         output_path = f"./tmp/temporary_polyhorn_input_depth{depth}.smt2"
-        
-        generator.generate_smt_file_almost_sure_reach(config, output_path, override_param_bounds=current_bounds)
-        
+
+        target_probability = config.get('target_probability', 1.0)
+
+        if target_probability < 1.0:
+            generator.generate_smt_file_quantitative_reach(config, output_path, override_param_bounds=current_bounds)
+        else:
+            generator.generate_smt_file_almost_sure_reach(config, output_path, override_param_bounds=current_bounds)
+
         config_path = f"./tmp/temporary_polyhorn_config_depth{depth}.json"
         generator.generate_config_file(entailment_solver, degree, smt_solver, output_path)
         
@@ -143,14 +148,17 @@ def main():
     
     else:
         generator = SRSMGenerator()
-        
+
         has_target = 'target_region' in config
         target_probability = config.get('target_probability', 1.0)
-        
-        if target_probability >= 1.0:
+
+        if target_probability < 1.0:
+            print(f"Generating SMT file for quantitative reachability (probability: {target_probability})...")
+            generator.generate_smt_file_quantitative_reach(config, output_path)
+        else:
             print("Generating SMT file for almost-sure reachability...")
-            generator.generate_smt_file_almost_sure_reach(config, output_path)
-        
+            generator.generate_smt_file_quantitative_reach(config, output_path)
+
         generator.generate_config_file(entailment_solver, degree, smt_solver, output_path)
         
         print("\nGeneration complete!")

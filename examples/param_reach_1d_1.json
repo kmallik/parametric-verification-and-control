@@ -27,17 +27,17 @@
     ],
     "noise_distribution": {
       "type": "uniform",
-      "params": {"lower": [-1], "upper": [0]}
+      "params": {"lower": [-0.75], "upper": [-0.25]}
     }
   },
   "target_region": {
     "bounds": [[90, 150]]
   },
-  "simplified_parametric": true,
   "enable_param_refinement": true,
   "param_refinement_threshold": 0.1,
+  "cutoff_time_per_smt_query": 10,
   "parallel_refinement": true,
-  "target_probability": 0.99,
+  "target_probability": 0.9,
   "degree": 1,
   "smt_solver": "z3",
   "entailment_solver": "farkas",

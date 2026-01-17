@@ -58,11 +58,138 @@ def _run_smt_query_worker(args, result_queue):
         result_queue.put(('error', str(e), None))
 
 
+def _run_dual_smt_query_worker(args, result_queue):
+    """Run dual SMT query in a separate process and put result in queue.
+
+    This function runs in a subprocess for the dual problem (demonic).
+    """
+    (current_bounds, config, entailment_solver, degree, smt_solver, file_id) = args
+
+    output_path = f"./tmp/temporary_dual_polyhorn_input_id{file_id}.smt2"
+    config_path = f"./tmp/temporary_dual_polyhorn_config_id{file_id}.json"
+    temp_output_path = f"./tmp/dual_polyhorn_temp_id{file_id}.txt"
+
+    try:
+        generator = SRSMGenerator()
+
+        has_target = 'target_region' in config
+        has_unsafe = 'unsafe_region' in config
+        original_target_probability = config.get('target_probability', 1.0)
+
+        # For dual problem, use 1 - target_probability
+        dual_target_probability = 1.0 - original_target_probability
+
+        # Create a modified config with the dual probability
+        dual_config = config.copy()
+        dual_config['target_probability'] = dual_target_probability
+
+        # Determine which type of dual specification
+        # Dual of reachability (has target) -> safety (avoid target)
+        # Dual of safety (has unsafe) -> reachability (reach unsafe)
+        if has_target and not has_unsafe:
+            if dual_target_probability > 0 and dual_target_probability < 1.0:
+                generator.generate_smt_file_dual_reach_simplified(dual_config, output_path, override_param_bounds=current_bounds)
+            else:
+                raise NotImplementedError("Dual reachability requires 0 < 1-p < 1")
+        elif has_unsafe and not has_target:
+            if dual_target_probability > 0 and dual_target_probability < 1.0:
+                generator.generate_smt_file_dual_safety_simplified(dual_config, output_path, override_param_bounds=current_bounds)
+            else:
+                raise NotImplementedError("Dual safety requires 0 < 1-p < 1")
+        else:
+            raise ValueError("Must specify either 'target_region' or 'unsafe_region', but not both")
+
+        generator.generate_config_file(entailment_solver, degree, smt_solver, output_path, config_path, temp_output_path)
+
+        is_sat, model = execute(formula=output_path, config=config_path)
+        result_queue.put(('success', is_sat, model))
+    except Exception as e:
+        result_queue.put(('error', str(e), None))
+
+
+def compute_complement_regions(angelic_regions: List[Dict], initial_bounds: List[Tuple[float, float]],
+                               threshold: float) -> List[Tuple[List[Tuple[float, float]], int]]:
+    """Compute the complement of angelic winning regions within the initial parameter bounds.
+
+    Returns a list of (bounds, depth) tuples representing regions to explore for demonic winning.
+    Uses a recursive subtraction approach.
+    """
+    def bounds_intersect(b1: List[Tuple[float, float]], b2: List[Tuple[float, float]]) -> bool:
+        """Check if two rectangular bounds intersect."""
+        for i in range(len(b1)):
+            if b1[i][1] <= b2[i][0] or b2[i][1] <= b1[i][0]:
+                return False
+        return True
+
+    def subtract_region(region: List[Tuple[float, float]], to_subtract: List[Tuple[float, float]]) -> List[List[Tuple[float, float]]]:
+        """Subtract one rectangular region from another, returning list of resulting regions."""
+        if not bounds_intersect(region, to_subtract):
+            return [region]
+
+        result = []
+        remaining = region
+
+        for dim in range(len(region)):
+            # Lower slice in this dimension
+            if remaining[dim][0] < to_subtract[dim][0]:
+                lower_slice = remaining.copy()
+                lower_slice[dim] = (remaining[dim][0], min(remaining[dim][1], to_subtract[dim][0]))
+                result.append(lower_slice)
+
+            # Upper slice in this dimension
+            if remaining[dim][1] > to_subtract[dim][1]:
+                upper_slice = remaining.copy()
+                upper_slice[dim] = (max(remaining[dim][0], to_subtract[dim][1]), remaining[dim][1])
+                result.append(upper_slice)
+
+            # Update remaining to the intersection in this dimension for next iteration
+            remaining = remaining.copy()
+            remaining[dim] = (max(remaining[dim][0], to_subtract[dim][0]),
+                             min(remaining[dim][1], to_subtract[dim][1]))
+
+            # If remaining is empty in any dimension, we're done
+            if remaining[dim][0] >= remaining[dim][1]:
+                break
+
+        return result
+
+    # Start with the full initial bounds
+    complement_regions = [initial_bounds]
+
+    # Subtract each angelic region
+    for angelic_info in angelic_regions:
+        angelic_bounds = angelic_info['param_bounds']
+        # Convert to list of tuples if needed
+        if isinstance(angelic_bounds[0], list):
+            angelic_bounds = [tuple(b) for b in angelic_bounds]
+
+        new_complement = []
+        for region in complement_regions:
+            subtracted = subtract_region(region, angelic_bounds)
+            new_complement.extend(subtracted)
+        complement_regions = new_complement
+
+    # Filter out regions that are too small (below threshold)
+    def compute_width(bounds):
+        return max(upper - lower for lower, upper in bounds)
+
+    valid_regions = []
+    for region in complement_regions:
+        width = compute_width(region)
+        if width > threshold:
+            valid_regions.append((region, 0))  # depth 0 for initial complement regions
+
+    return valid_regions
+
+
 def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                           degree: int, smt_solver: str, threshold: float = 0.01,
                           parallel: bool = False,
-                          cutoff_time: Optional[float] = None) -> Tuple[List[Dict], List[Dict]]:
-    """Iteratively refine parameter space to find all SAT regions.
+                          cutoff_time: Optional[float] = None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+    """Iteratively refine parameter space to find angelic and demonic winning regions.
+
+    First finds angelic winning regions (exists controller satisfying spec).
+    Then finds demonic winning regions in the complement (for all controllers, dual spec satisfied).
 
     Args:
         config: Configuration dictionary
@@ -74,9 +201,10 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         cutoff_time: Optional timeout in seconds for each SMT query. If None, no timeout.
 
     Returns:
-        Tuple of (sat_regions, timed_out_regions):
-        - sat_regions: List of dicts with 'param_bounds', 'model', 'is_sat' for SAT regions
-        - timed_out_regions: List of dicts with 'param_bounds' for regions that timed out
+        Tuple of (angelic_regions, demonic_regions, timed_out_regions):
+        - angelic_regions: List of dicts with 'param_bounds', 'model' for angelic winning regions
+        - demonic_regions: List of dicts with 'param_bounds', 'model' for demonic winning regions
+        - timed_out_regions: List of dicts with 'param_bounds' for regions that timed out (neither angelic nor demonic)
     """
 
     if 'param_bounds' not in config['system']:
@@ -308,21 +436,180 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
 
         models = sat_regions
 
+    angelic_regions = models
+    angelic_timed_out = timed_out_regions
+
     print(f"\n{'='*80}")
-    print(f"REFINEMENT COMPLETE")
+    print(f"ANGELIC REFINEMENT COMPLETE")
     print(f"{'='*80}")
-    print(f"Total SAT regions found: {len(models)}")
-    for i, model_info in enumerate(models, 1):
+    print(f"Total angelic winning regions found: {len(angelic_regions)}")
+    for i, model_info in enumerate(angelic_regions, 1):
         print(f"  Region {i}: {model_info['param_bounds']}")
 
-    if timed_out_regions:
-        print(f"\nTimed out regions: {len(timed_out_regions)}")
-        for i, region_info in enumerate(timed_out_regions, 1):
+    if angelic_timed_out:
+        print(f"\nAngelic timed out regions: {len(angelic_timed_out)}")
+        for i, region_info in enumerate(angelic_timed_out, 1):
             print(f"  Region {i}: {region_info['param_bounds']}")
 
     print(f"{'='*80}\n")
 
-    return models, timed_out_regions
+    # Now find demonic winning regions in the complement of angelic regions
+    print(f"\n{'='*80}")
+    print(f"DEMONIC REFINEMENT (DUAL PROBLEM)")
+    print(f"{'='*80}")
+
+    # Compute complement of angelic regions
+    complement_regions = compute_complement_regions(angelic_regions, initial_param_bounds, threshold)
+
+    if not complement_regions:
+        print("No complement regions to explore (all parameters are angelic winning)")
+        demonic_regions = []
+        demonic_timed_out = []
+    else:
+        print(f"Complement regions to explore: {len(complement_regions)}")
+        for i, (region, _) in enumerate(complement_regions, 1):
+            print(f"  Region {i}: {region}")
+        print(f"{'='*80}\n")
+
+        # Explore complement regions for demonic winning using dual problem
+        from collections import deque
+
+        queue = deque(complement_regions)
+        demonic_regions = []
+        demonic_timed_out = []
+
+        while queue:
+            current_bounds, depth = queue.popleft()
+            indent = "  " * depth
+            width = compute_width(current_bounds)
+
+            print(f"{indent}[Demonic] Exploring region: {current_bounds} (width: {width:.6f})")
+
+            file_id = get_unique_file_id()
+
+            if cutoff_time is None:
+                # No timeout - run directly
+                generator = SRSMGenerator()
+
+                has_target = 'target_region' in config
+                has_unsafe = 'unsafe_region' in config
+                original_target_probability = config.get('target_probability', 1.0)
+                dual_target_probability = 1.0 - original_target_probability
+
+                dual_config = config.copy()
+                dual_config['target_probability'] = dual_target_probability
+
+                output_path = f"./tmp/temporary_dual_polyhorn_input_id{file_id}.smt2"
+                config_path = f"./tmp/temporary_dual_polyhorn_config_id{file_id}.json"
+                temp_output_path = f"./tmp/dual_polyhorn_temp_id{file_id}.txt"
+
+                try:
+                    if has_target and not has_unsafe:
+                        generator.generate_smt_file_dual_reach_simplified(dual_config, output_path, override_param_bounds=current_bounds)
+                    elif has_unsafe and not has_target:
+                        generator.generate_smt_file_dual_safety_simplified(dual_config, output_path, override_param_bounds=current_bounds)
+
+                    generator.generate_config_file(entailment_solver, degree, smt_solver, output_path, config_path, temp_output_path)
+
+                    print(f"{indent}[Demonic] Running PolyQnt solver...")
+                    is_sat, model = execute(formula=output_path, config=config_path)
+                except Exception as e:
+                    print(f"{indent}[Demonic] Error: {e}")
+                    continue
+
+                print(f"{indent}[Demonic] Result: {is_sat}")
+
+                if is_sat == 'sat':
+                    print(f"{indent}[Demonic] ✓ Demonic winning region found!")
+                    demonic_regions.append({'param_bounds': current_bounds, 'model': model, 'is_sat': 'sat'})
+                elif width <= threshold:
+                    print(f"{indent}[Demonic] ✗ UNSAT (below threshold)")
+                else:
+                    print(f"{indent}[Demonic] Splitting region...")
+                    max_dim = max(range(len(current_bounds)),
+                                 key=lambda d: current_bounds[d][1] - current_bounds[d][0])
+                    left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
+                    queue.append((left_bounds, depth + 1))
+                    queue.append((right_bounds, depth + 1))
+            else:
+                # With timeout - use subprocess
+                print(f"{indent}[Demonic] Running PolyQnt solver (timeout: {cutoff_time}s)...")
+
+                args = (current_bounds, config, entailment_solver, degree, smt_solver, file_id)
+
+                result_queue = multiprocessing.Queue()
+                process = multiprocessing.Process(
+                    target=_run_dual_smt_query_worker,
+                    args=(args, result_queue)
+                )
+                process.start()
+                process.join(timeout=cutoff_time)
+
+                if process.is_alive():
+                    print(f"{indent}[Demonic] ⏱ TIMEOUT - query exceeded {cutoff_time}s")
+                    process.terminate()
+                    process.join(timeout=1)
+                    if process.is_alive():
+                        process.kill()
+                        process.join()
+
+                    if width <= threshold:
+                        print(f"{indent}[Demonic] ⏱ Region at minimum granularity - marking as timed out")
+                        demonic_timed_out.append({'param_bounds': current_bounds, 'depth': depth})
+                    else:
+                        print(f"{indent}[Demonic] Splitting timed-out region...")
+                        max_dim = max(range(len(current_bounds)),
+                                     key=lambda d: current_bounds[d][1] - current_bounds[d][0])
+                        left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
+                        queue.append((left_bounds, depth + 1))
+                        queue.append((right_bounds, depth + 1))
+                    continue
+
+                try:
+                    result = result_queue.get_nowait()
+                    if result[0] == 'success':
+                        is_sat, model = result[1], result[2]
+                    else:
+                        print(f"{indent}[Demonic] Error: {result[1]}")
+                        continue
+                except Exception as e:
+                    print(f"{indent}[Demonic] Error getting result: {e}")
+                    continue
+
+                print(f"{indent}[Demonic] Result: {is_sat}")
+
+                if is_sat == 'sat':
+                    print(f"{indent}[Demonic] ✓ Demonic winning region found!")
+                    demonic_regions.append({'param_bounds': current_bounds, 'model': model, 'is_sat': 'sat'})
+                elif width <= threshold:
+                    print(f"{indent}[Demonic] ✗ UNSAT (below threshold)")
+                else:
+                    print(f"{indent}[Demonic] Splitting region...")
+                    max_dim = max(range(len(current_bounds)),
+                                 key=lambda d: current_bounds[d][1] - current_bounds[d][0])
+                    left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
+                    queue.append((left_bounds, depth + 1))
+                    queue.append((right_bounds, depth + 1))
+
+    print(f"\n{'='*80}")
+    print(f"DEMONIC REFINEMENT COMPLETE")
+    print(f"{'='*80}")
+    print(f"Total demonic winning regions found: {len(demonic_regions)}")
+    for i, model_info in enumerate(demonic_regions, 1):
+        print(f"  Region {i}: {model_info['param_bounds']}")
+
+    if demonic_timed_out:
+        print(f"\nDemonic timed out regions: {len(demonic_timed_out)}")
+        for i, region_info in enumerate(demonic_timed_out, 1):
+            print(f"  Region {i}: {region_info['param_bounds']}")
+
+    print(f"{'='*80}\n")
+
+    # Combine timed out regions from both angelic and demonic phases
+    # These are regions that are neither angelic nor demonic winning
+    all_timed_out = angelic_timed_out + demonic_timed_out
+
+    return angelic_regions, demonic_regions, all_timed_out
 
 
 def main():
@@ -356,28 +643,42 @@ def main():
         if cutoff_time is not None:
             print(f"Anytime mode enabled with cutoff time: {cutoff_time} seconds per query.")
 
-        models, timed_out_regions = refine_parameter_space(
+        angelic_regions, demonic_regions, timed_out_regions = refine_parameter_space(
             config, entailment_solver, degree, smt_solver, threshold, parallel, cutoff_time
         )
 
         print(f"\n{'='*80}")
         print("FINAL SUMMARY")
         print(f"{'='*80}")
-        print(f"Total satisfiable regions: {len(models)}")
 
-        for i, model_info in enumerate(models, 1):
-            print(f"\nRegion {i}:")
-            print(f"  Parameter bounds: {model_info['param_bounds']}")
-            print(f"  Model: {models[i-1]['model']}")
+        print(f"\n--- ANGELIC WINNING REGIONS ---")
+        print(f"(Exists controller satisfying the specification)")
+        print(f"Total: {len(angelic_regions)}")
+
+        for i, model_info in enumerate(angelic_regions, 1):
+            print(f"\n  Region {i}:")
+            print(f"    Parameter bounds: {model_info['param_bounds']}")
+            print(f"    Certificate: {model_info['model']}")
+
+        print(f"\n--- DEMONIC WINNING REGIONS ---")
+        print(f"(For all controllers, the dual specification is satisfied)")
+        print(f"Total: {len(demonic_regions)}")
+
+        for i, model_info in enumerate(demonic_regions, 1):
+            print(f"\n  Region {i}:")
+            print(f"    Parameter bounds: {model_info['param_bounds']}")
+            print(f"    Certificate: {model_info['model']}")
 
         if timed_out_regions:
-            print(f"\nTimed out regions (inconclusive): {len(timed_out_regions)}")
+            print(f"\n--- INCONCLUSIVE REGIONS (Timed Out) ---")
+            print(f"(Neither angelic nor demonic winning determined)")
+            print(f"Total: {len(timed_out_regions)}")
             for i, region_info in enumerate(timed_out_regions, 1):
                 print(f"  Region {i}: {region_info['param_bounds']}")
 
-        print(f"{'='*80}\n")
+        print(f"\n{'='*80}\n")
 
-        return models, timed_out_regions
+        return angelic_regions, demonic_regions, timed_out_regions
     
     else:
         # Create tmp directory if it doesn't exist

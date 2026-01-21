@@ -1,0 +1,46 @@
+{
+  "system": {
+    "type": "cartesian",
+    "state_vars": ["S1"],
+    "param_vars": ["P1"],
+    "noise_vars": ["W1"],
+    "control_vars": ["U1"],
+    "state_bounds": [[-2, 150]],
+    "param_bounds": [[0.0, 3.0]],
+    "control_bounds":[[-1, 1]],
+    "initial_region": {
+      "bounds": [[2, 3]]
+    },
+    "dynamics": [
+      {
+        "condition": "-2 <= S1 <= 0",
+        "transforms": {"S1": "(+ S1 0)"}
+      },
+      {
+        "condition": "0 <= S1 <= 100",
+        "transforms": {"S1": "(+ S1 (+ U1 (+ W1 P1)))"}
+      },
+      {
+        "condition": "S1 >= 100",
+        "transforms": {"S1": "(+ S1 0)"}
+      }
+    ],
+    "noise_distribution": {
+      "type": "uniform",
+      "params": {"lower": [-1], "upper": [1]}
+    }
+  },
+  "unsafe_region": {
+    "bounds": [[90, 150]]
+  },
+  "simplified_parametric": true,
+  "enable_param_refinement": true,
+  "param_refinement_threshold": 0.1,
+  "parallel_refinement": true,
+  "cutoff_time_per_smt_query": 10,
+  "target_probability": 0.95,
+  "degree": 1,
+  "smt_solver": "z3",
+  "entailment_solver": "farkas",
+  "output_smt_path": "./tmp/temporary_polyhorn_input.smt2"
+}

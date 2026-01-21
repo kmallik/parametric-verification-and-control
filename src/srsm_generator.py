@@ -968,9 +968,9 @@ class SRSMGenerator:
 
         target_probability = config['target_probability']
 
-        # Special case: if target probability is 1, almost-sure reachability (not yet implemented)
+        # Special case: if target probability is 1, use qualitative reachability instead
         if target_probability == 1:
-            raise NotImplementedError("Almost-sure reachability (target_probability = 1) not yet implemented for simplified version")
+            return self.generate_smt_file_qualitative_reach_simplified(config, output_path, override_param_bounds)
 
         if target_probability <= 0 or target_probability > 1:
             raise ValueError("Target probability must be in (0, 1]")
@@ -1097,6 +1097,154 @@ class SRSMGenerator:
             param_bounds_constraint, I_expr, V_expr, "1"))
 
         # Control bounds (if applicable)
+        if control_vars:
+            control_bounds_list = config['system'].get('control_bounds', [])
+            formulas.extend(self.generate_formulas_control_bounds_parametric_simplified(
+                state_vars, param_vars, state_bounds_constraint, param_bounds_constraint,
+                I_expr, control_vars, controller_exprs, control_bounds_list))
+
+        # Note: No Q(P) >= 0 formula in simplified version
+
+        self._write_smt_file(output_path, formulas)
+        return output_path
+
+    def generate_smt_file_qualitative_reach_simplified(self, config: Dict[str, Any],
+                                                       output_path: str = "./tmp/temporary_polyhorn_input.smt2",
+                                                       override_param_bounds: List[Tuple[float, float]] = None):
+        """Generate SMT2 file for qualitative (almost-sure) reachability (simplified parametric version).
+
+        Certificate conditions for qualitative reachability:
+        - Invariant conditions (same as quantitative):
+          (a) For all initial states, I(S) >= 0
+          (b) For all states S, I(S) >= 0 => I(S') >= 0
+          (c) For all states S, I(S) >= 0 => V(S) >= 0
+        - Expected decrease (without V upper bound):
+          (a) Epsilon >= min float
+          (b) For all S, I(S) >= 0 and S not in target => V(S) >= E[V(S')] + Epsilon
+        - Control bounds: For all S, C(S) respects bounds
+
+        Key differences from quantitative reachability:
+        - No "V(S) <= 1/(1-p)" in expected decrease LHS
+        - No "V(S) <= 1" condition for initial states
+        """
+        self.validate_config(config)
+
+        degree = config['degree']
+        state_vars = config['system']['state_vars']
+        noise_vars = config['system'].get('noise_vars', [])
+        control_vars = config['system'].get('control_vars', [])
+        param_vars = config['system'].get('param_vars', [])
+        state_bounds = config['system'].get('state_bounds', [])
+
+        if not param_vars:
+            raise ValueError("Simplified parametric version requires parameters (param_vars)")
+
+        param_bounds = None
+        if override_param_bounds is not None:
+            param_bounds = override_param_bounds
+        else:
+            param_bounds = config['system'].get('param_bounds')
+
+        if not param_bounds:
+            raise ValueError("Parameter bounds (param_bounds) required for simplified parametric version")
+
+        # Parse target region
+        target_region = config.get('target_region', {})
+        target_bounds_list = target_region.get('bounds', [])
+        target_bounds = self.parse_cartesian_bounds(target_bounds_list, state_vars)
+
+        # Parse initial region
+        initial_region = config['system'].get('initial_region', {})
+        initial_bounds = initial_region.get('bounds', [])
+        initial_constraint = self.parse_cartesian_bounds(initial_bounds, state_vars)
+
+        # State bounds constraint
+        state_bounds_constraint = self.parse_cartesian_bounds(state_bounds, state_vars)
+
+        # Parameter bounds constraint
+        param_bounds_constraint = self.parse_cartesian_bounds(param_bounds, param_vars)
+
+        # Noise bounds
+        noise_distribution = config['system'].get('noise_distribution', {})
+        noise_bounds_constraint = self.get_noise_bounds(noise_vars, noise_distribution)
+
+        # Dynamics
+        next_state_exprs = self.generate_dynamics_expression(config['system']['dynamics'], state_vars, control_vars, noise_vars)
+
+        # Check for param*noise multiplication
+        use_param_noise_bounds = False
+        if param_vars and noise_vars:
+            if isinstance(next_state_exprs, list):
+                for piece in next_state_exprs:
+                    transforms = piece.get('transforms', {})
+                    for expr in transforms.values():
+                        pairs = self.detect_param_noise_multiplication(expr, param_vars, noise_vars)
+                        if pairs:
+                            use_param_noise_bounds = True
+                            break
+                    if use_param_noise_bounds:
+                        break
+            else:
+                for expr in next_state_exprs.values():
+                    pairs = self.detect_param_noise_multiplication(expr, param_vars, noise_vars)
+                    if pairs:
+                        use_param_noise_bounds = True
+                        break
+
+        # Declare symbolic constants
+        # V and C depend on both state and parameter variables
+        v_c_vars = state_vars + param_vars
+        V_expr = self.generate_polynomial_template(v_c_vars, degree, "V")
+        I_expr = self.generate_polynomial_template(state_vars, degree, "I")
+
+        controller_exprs = {}
+        if control_vars:
+            for control_var in control_vars:
+                controller_exprs[control_var] = self.generate_polynomial_template(v_c_vars, degree, "C")
+
+        epsilon = self.new_constant("Epsilon")
+
+        # Substitute control variables with controller expressions
+        if control_vars:
+            if isinstance(next_state_exprs, dict):
+                for var in next_state_exprs:
+                    next_state_exprs[var] = self.substitute_control(next_state_exprs[var], control_vars, controller_exprs)
+            else:
+                for piece in next_state_exprs:
+                    for var in piece['transforms']:
+                        piece['transforms'][var] = self.substitute_control(piece['transforms'][var], control_vars, controller_exprs)
+
+        formulas = []
+
+        # Formula 1: Initial states satisfy invariant (same as quantitative)
+        formulas.append(self.generate_formula_initial_invariant_parametric_simplified(
+            state_vars, param_vars, state_bounds_constraint, initial_constraint,
+            param_bounds_constraint, I_expr))
+
+        # Formula 2: Invariant preservation (same as quantitative)
+        formulas.extend(self.generate_formulas_invariant_preservation_parametric_simplified(
+            state_vars, param_vars, noise_vars, state_bounds_constraint,
+            param_bounds_constraint, noise_bounds_constraint, I_expr, next_state_exprs,
+            noise_distribution, use_param_noise_bounds))
+
+        # Formula 3: V is non-negative on invariant (same as quantitative)
+        formulas.append(self.generate_formula_v_nonnegative_parametric_simplified(
+            state_vars, param_vars, state_bounds_constraint, param_bounds_constraint, I_expr, V_expr))
+
+        # Epsilon is positive
+        formulas.append(self.generate_formula_epsilon_positive(epsilon))
+
+        # Formula 4/5: Expected decrease (WITHOUT v_upper_bound - key difference from quantitative)
+        # Pass v_upper_bound=None to exclude the "V <= 1/(1-p)" constraint from LHS
+        formulas.extend(self.generate_formulas_expected_decrease_parametric_simplified(
+            state_vars, param_vars, noise_vars, state_bounds_constraint,
+            param_bounds_constraint, target_bounds_list, I_expr, V_expr, epsilon, next_state_exprs,
+            noise_distribution, v_upper_bound=None))
+
+        # Note: NO initial value bound V(S) <= 1 for qualitative reachability
+        # (This is the second key difference from quantitative)
+
+        # Control bounds (if applicable) - same as quantitative
         if control_vars:
             control_bounds_list = config['system'].get('control_bounds', [])
             formulas.extend(self.generate_formulas_control_bounds_parametric_simplified(

@@ -1,6 +1,7 @@
 import json
 import sys
 import os
+import time
 import threading
 import multiprocessing
 from typing import List, Dict, Any, Tuple, Optional
@@ -41,7 +42,7 @@ def _run_smt_query_worker(args, result_queue):
             if target_probability < 1.0:
                 generator.generate_smt_file_quantitative_reach_simplified(config, output_path, override_param_bounds=current_bounds)
             else:
-                raise NotImplementedError("Almost-sure reachability (target_probability = 1) not yet implemented")
+                generator.generate_smt_file_qualitative_reach_simplified(config, output_path, override_param_bounds=current_bounds)
         elif has_unsafe and not has_target:
             if target_probability < 1.0:
                 generator.generate_smt_file_quantitative_safety_simplified(config, output_path, override_param_bounds=current_bounds)
@@ -105,6 +106,45 @@ def _run_dual_smt_query_worker(args, result_queue):
         result_queue.put(('success', is_sat, model))
     except Exception as e:
         result_queue.put(('error', str(e), None))
+
+
+def region_is_contained_in(inner_bounds: List, outer_bounds: List) -> bool:
+    """Check if inner_bounds is completely contained within outer_bounds.
+
+    Both bounds are lists of [lower, upper] pairs, one per dimension.
+    Returns True if inner is a subset of outer in all dimensions.
+    """
+    for i in range(len(inner_bounds)):
+        inner_lo, inner_hi = inner_bounds[i]
+        outer_lo, outer_hi = outer_bounds[i]
+        # Inner must be within outer in each dimension
+        if inner_lo < outer_lo or inner_hi > outer_hi:
+            return False
+    return True
+
+
+def filter_contained_regions(timed_out_regions: List[Dict], winning_regions: List[Dict]) -> List[Dict]:
+    """Filter out timed-out regions that are contained in any winning region.
+
+    Args:
+        timed_out_regions: List of dicts with 'param_bounds' for regions that timed out
+        winning_regions: List of dicts with 'param_bounds' for angelic or demonic winning regions
+
+    Returns:
+        List of timed-out regions that are NOT contained in any winning region
+    """
+    truly_inconclusive = []
+    for timed_out in timed_out_regions:
+        timed_out_bounds = timed_out['param_bounds']
+        is_contained = False
+        for winning in winning_regions:
+            winning_bounds = winning['param_bounds']
+            if region_is_contained_in(timed_out_bounds, winning_bounds):
+                is_contained = True
+                break
+        if not is_contained:
+            truly_inconclusive.append(timed_out)
+    return truly_inconclusive
 
 
 def compute_complement_regions(angelic_regions: List[Dict], initial_bounds: List[Tuple[float, float]],
@@ -282,7 +322,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 if target_probability < 1.0:
                     generator.generate_smt_file_quantitative_reach_simplified(config, output_path, override_param_bounds=current_bounds)
                 else:
-                    raise NotImplementedError("Almost-sure reachability (target_probability = 1) not yet implemented")
+                    generator.generate_smt_file_qualitative_reach_simplified(config, output_path, override_param_bounds=current_bounds)
             elif has_unsafe and not has_target:
                 # Safety specification
                 if target_probability < 1.0:
@@ -606,10 +646,19 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
     print(f"{'='*80}\n")
 
     # Combine timed out regions from both angelic and demonic phases
-    # These are regions that are neither angelic nor demonic winning
     all_timed_out = angelic_timed_out + demonic_timed_out
 
-    return angelic_regions, demonic_regions, all_timed_out
+    # Filter out timed-out regions that are contained in any winning region
+    # (angelic or demonic). These are not truly inconclusive since we know
+    # their status from the containing winning region.
+    all_winning = angelic_regions + demonic_regions
+    truly_inconclusive = filter_contained_regions(all_timed_out, all_winning)
+
+    if len(all_timed_out) != len(truly_inconclusive):
+        print(f"Filtered out {len(all_timed_out) - len(truly_inconclusive)} timed-out regions "
+              f"that are contained in winning regions.")
+
+    return angelic_regions, demonic_regions, truly_inconclusive
 
 
 def main():
@@ -684,6 +733,14 @@ def main():
         # Create tmp directory if it doesn't exist
         os.makedirs('./tmp', exist_ok=True)
 
+        # Check for cutoff time (even without refinement)
+        cutoff_time_config = config.get('cutoff_time_per_smt_query', None)
+        # Handle "none" string as no cutoff
+        if cutoff_time_config == "none" or cutoff_time_config is None:
+            cutoff_time = None
+        else:
+            cutoff_time = float(cutoff_time_config)
+
         generator = SRSMGenerator()
 
         has_target = 'target_region' in config
@@ -697,7 +754,8 @@ def main():
                 print(f"Generating SMT file for quantitative reachability (probability: {target_probability})...")
                 generator.generate_smt_file_quantitative_reach_simplified(config, output_path)
             else:
-                raise NotImplementedError("Almost-sure reachability (target_probability = 1) not yet implemented")
+                print(f"Generating SMT file for qualitative (almost-sure) reachability...")
+                generator.generate_smt_file_qualitative_reach_simplified(config, output_path)
         elif has_unsafe and not has_target:
             # Safety specification
             if target_probability < 1.0:
@@ -708,23 +766,68 @@ def main():
         else:
             raise ValueError("Must specify either 'target_region' or 'unsafe_region', but not both")
 
-        generator.generate_config_file(entailment_solver, degree, smt_solver, output_path)
-        
+        config_path = "./tmp/temporary_polyhorn_config.json"
+        generator.generate_config_file(entailment_solver, degree, smt_solver, output_path, config_path)
+
         print("\nGeneration complete!")
         print(f"  SMT file: {output_path}")
-        print(f"  Config file: ./tmp/temporary_polyhorn_config.json")
-        
-        print("\nExecuting PolyQnt solver...")
-        is_sat, model = execute(
-            formula="./tmp/temporary_polyhorn_input.smt2",
-            config="./tmp/temporary_polyhorn_config.json",
-        )
-        
+        print(f"  Config file: {config_path}")
+
+        if cutoff_time is None:
+            # No timeout - run directly and track time
+            print("\nExecuting PolyQnt solver...")
+            start_time = time.time()
+            is_sat, model = execute(formula=output_path, config=config_path)
+            elapsed_time = time.time() - start_time
+        else:
+            # With timeout - use subprocess
+            print(f"\nExecuting PolyQnt solver (timeout: {cutoff_time}s)...")
+            result_queue = multiprocessing.Queue()
+
+            def run_solver():
+                try:
+                    is_sat, model = execute(formula=output_path, config=config_path)
+                    result_queue.put(('success', is_sat, model))
+                except Exception as e:
+                    result_queue.put(('error', str(e), None))
+
+            process = multiprocessing.Process(target=run_solver)
+            process.start()
+            process.join(timeout=cutoff_time)
+
+            if process.is_alive():
+                # Timeout - terminate the process
+                print(f"\n⏱ TIMEOUT - query exceeded {cutoff_time}s")
+                process.terminate()
+                process.join(timeout=1)
+                if process.is_alive():
+                    process.kill()
+                    process.join()
+                print("Result: TIMEOUT")
+                return None
+
+            # Process completed - get the result
+            try:
+                result = result_queue.get_nowait()
+                if result[0] == 'success':
+                    is_sat, model = result[1], result[2]
+                else:
+                    print(f"Error: {result[1]}")
+                    return None
+            except Exception as e:
+                print(f"Error getting result: {e}")
+                return None
+
         print("\nis_sat:")
         print(is_sat)
         if is_sat == 'sat':
             print("\nmodel:")
             print(model)
+
+        # Report time if no cutoff was used
+        if cutoff_time is None:
+            print(f"\nTime taken: {elapsed_time:.2f} seconds")
+
         return 1
 
 

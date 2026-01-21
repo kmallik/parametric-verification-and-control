@@ -1,0 +1,38 @@
+{
+  "system": {
+    "type": "cartesian",
+    "state_vars": ["S1", "S2"],
+    "param_vars": ["P1"],
+    "noise_vars": ["W1"],
+    "state_bounds": [[-2, 2], [-2, 2]],
+    "param_bounds": [[0.0, 0.001]],
+    "initial_region": {
+      "bounds": [[-1.0, -0.8], [-1.0, -0.8]]
+    },
+    "dynamics": [
+      {
+        "condition": "-2 <= S1 <= 2 and -2 <= S2 <= 2",
+        "transforms": {
+          "S1": "(+ (* -1 S1) (+ (* -2 S2) (+ P1 W1)))",
+          "S2": "(+ S1 (+ (* -1 S2) (+ P1 W1)))"
+        }
+      }
+    ],
+    "noise_distribution": {
+      "type": "uniform",
+      "params": {"lower": [-0.01], "upper": [0.01]}
+    }
+  },
+  "target_region": {
+    "bounds": [[-0.1, 0.1], [-0.1, 0.1]]
+  },
+  "enable_param_refinement": false,
+  "param_refinement_threshold": 0.1,
+  "cutoff_time_per_smt_query": 120,
+  "parallel_refinement": true,
+  "target_probability": 1,
+  "degree": 2,
+  "smt_solver": "mathsat",
+  "entailment_solver": "putinar",
+  "output_smt_path": "./tmp/temporary_polyhorn_input.smt2"
+}

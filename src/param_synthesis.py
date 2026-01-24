@@ -4,6 +4,7 @@ import os
 import time
 import threading
 import multiprocessing
+from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor
 from polyqent.main import execute
@@ -145,6 +146,144 @@ def filter_contained_regions(timed_out_regions: List[Dict], winning_regions: Lis
         if not is_contained:
             truly_inconclusive.append(timed_out)
     return truly_inconclusive
+
+
+def merge_adjacent_regions(regions: List[Dict]) -> List[Dict]:
+    """Merge adjacent regions that share a boundary.
+
+    Two regions can be merged if:
+    - They differ in exactly one dimension
+    - In that dimension, one's upper bound equals the other's lower bound
+    - In all other dimensions, they have identical bounds
+
+    Returns a new list with merged regions.
+    """
+    if not regions:
+        return []
+
+    # Extract just the param_bounds for merging
+    bounds_list = [r['param_bounds'] for r in regions]
+
+    # Convert to list of tuples if needed
+    bounds_list = [
+        [tuple(b) if isinstance(b, list) else b for b in bounds]
+        for bounds in bounds_list
+    ]
+
+    def can_merge(b1: List[Tuple[float, float]], b2: List[Tuple[float, float]]) -> int:
+        """Check if two regions can be merged. Returns the dimension index if mergeable, -1 otherwise."""
+        if len(b1) != len(b2):
+            return -1
+
+        differ_dim = -1
+        for dim in range(len(b1)):
+            if b1[dim] != b2[dim]:
+                if differ_dim != -1:
+                    # Already found a differing dimension, can't merge
+                    return -1
+                differ_dim = dim
+
+        if differ_dim == -1:
+            # Identical regions (shouldn't happen, but handle it)
+            return -1
+
+        # Check if they share a boundary in the differing dimension
+        if b1[differ_dim][1] == b2[differ_dim][0] or b2[differ_dim][1] == b1[differ_dim][0]:
+            return differ_dim
+
+        return -1
+
+    def merge_bounds(b1: List[Tuple[float, float]], b2: List[Tuple[float, float]], dim: int) -> List[Tuple[float, float]]:
+        """Merge two regions along the specified dimension."""
+        result = list(b1)
+        result[dim] = (min(b1[dim][0], b2[dim][0]), max(b1[dim][1], b2[dim][1]))
+        return result
+
+    # Keep merging until no more merges are possible
+    merged = bounds_list.copy()
+    changed = True
+
+    while changed:
+        changed = False
+        new_merged = []
+        used = [False] * len(merged)
+
+        for i in range(len(merged)):
+            if used[i]:
+                continue
+
+            current = merged[i]
+
+            for j in range(i + 1, len(merged)):
+                if used[j]:
+                    continue
+
+                merge_dim = can_merge(current, merged[j])
+                if merge_dim != -1:
+                    current = merge_bounds(current, merged[j], merge_dim)
+                    used[j] = True
+                    changed = True
+
+            new_merged.append(current)
+            used[i] = True
+
+        merged = new_merged
+
+    # Convert back to the original format (list of dicts with param_bounds)
+    return [{'param_bounds': bounds} for bounds in merged]
+
+
+def write_to_logfile(logfile: str, config_file: str, angelic_regions: List[Dict],
+                     demonic_regions: List[Dict], inconclusive_regions: List[Dict],
+                     runtime: float) -> None:
+    """Write experimental results to a logfile.
+
+    Appends the results to the logfile, creating it if it doesn't exist.
+    Includes date, time, input filename, runtime, and experimental results.
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    with open(logfile, 'a') as f:
+        f.write(f"\n{'='*80}\n")
+        f.write(f"EXPERIMENT LOG ENTRY\n")
+        f.write(f"{'='*80}\n")
+        f.write(f"Date/Time: {timestamp}\n")
+        f.write(f"Input file: {config_file}\n")
+        f.write(f"Total runtime: {runtime:.2f} seconds\n")
+        f.write(f"\n")
+
+        # Angelic regions
+        f.write(f"--- ANGELIC WINNING REGIONS ---\n")
+        f.write(f"(Exists controller satisfying the specification)\n")
+        f.write(f"Total: {len(angelic_regions)}\n")
+        for i, model_info in enumerate(angelic_regions, 1):
+            f.write(f"\n  Region {i}:\n")
+            f.write(f"    Parameter bounds: {model_info['param_bounds']}\n")
+            f.write(f"    Certificate: {model_info['model']}\n")
+
+        f.write(f"\n")
+
+        # Demonic regions
+        f.write(f"--- DEMONIC WINNING REGIONS ---\n")
+        f.write(f"(For all controllers, the dual specification is satisfied)\n")
+        f.write(f"Total: {len(demonic_regions)}\n")
+        for i, model_info in enumerate(demonic_regions, 1):
+            f.write(f"\n  Region {i}:\n")
+            f.write(f"    Parameter bounds: {model_info['param_bounds']}\n")
+            f.write(f"    Certificate: {model_info['model']}\n")
+
+        f.write(f"\n")
+
+        # Inconclusive regions
+        f.write(f"--- INCONCLUSIVE REGIONS (Merged) ---\n")
+        f.write(f"(Neither angelic nor demonic winning determined)\n")
+        f.write(f"Total: {len(inconclusive_regions)}\n")
+        for i, region_info in enumerate(inconclusive_regions, 1):
+            f.write(f"  Region {i}: {region_info['param_bounds']}\n")
+
+        f.write(f"\n{'='*80}\n\n")
+
+    print(f"Results appended to logfile: {logfile}")
 
 
 def compute_complement_regions(angelic_regions: List[Dict], initial_bounds: List[Tuple[float, float]],
@@ -304,6 +443,11 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
 
             print(f"{indent}Exploring region: {current_bounds} (width: {width:.6f})")
 
+            # Early threshold check - skip SMT generation if region is too small
+            if width <= threshold:
+                print(f"{indent}✗ Below threshold - skipping SMT generation")
+                return []
+
             generator = SRSMGenerator()
 
             # Use unique file ID to avoid race conditions in parallel mode
@@ -347,35 +491,36 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 print(f"{indent}✓ SAT region found!")
                 return [{'param_bounds': current_bounds, 'model': model, 'is_sat': 'sat'}]
 
-            elif width <= threshold:
-                print(f"{indent}✗ UNSAT (below threshold)")
+            # UNSAT - check if children would be below threshold before splitting
+            max_dim = max(range(len(current_bounds)),
+                         key=lambda d: current_bounds[d][1] - current_bounds[d][0])
+            left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
+            child_width = compute_width(left_bounds)
+
+            if child_width <= threshold:
+                print(f"{indent}✗ UNSAT - children would be below threshold ({child_width:.6f} <= {threshold})")
                 return []
 
+            print(f"{indent}Splitting region...")
+
+            if parallel:
+                # Explore both children in parallel
+                print(f"{indent}Exploring both children in parallel...")
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    left_future = executor.submit(explore_region, left_bounds, depth + 1)
+                    right_future = executor.submit(explore_region, right_bounds, depth + 1)
+
+                    left_models = left_future.result()
+                    right_models = right_future.result()
             else:
-                print(f"{indent}Splitting region...")
-                max_dim = max(range(len(current_bounds)),
-                             key=lambda d: current_bounds[d][1] - current_bounds[d][0])
+                # Serial exploration
+                print(f"{indent}Exploring left child...")
+                left_models = explore_region(left_bounds, depth + 1)
 
-                left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
+                print(f"{indent}Exploring right child...")
+                right_models = explore_region(right_bounds, depth + 1)
 
-                if parallel:
-                    # Explore both children in parallel
-                    print(f"{indent}Exploring both children in parallel...")
-                    with ThreadPoolExecutor(max_workers=2) as executor:
-                        left_future = executor.submit(explore_region, left_bounds, depth + 1)
-                        right_future = executor.submit(explore_region, right_bounds, depth + 1)
-
-                        left_models = left_future.result()
-                        right_models = right_future.result()
-                else:
-                    # Serial exploration
-                    print(f"{indent}Exploring left child...")
-                    left_models = explore_region(left_bounds, depth + 1)
-
-                    print(f"{indent}Exploring right child...")
-                    right_models = explore_region(right_bounds, depth + 1)
-
-                return left_models + right_models
+            return left_models + right_models
 
         models = explore_region(initial_param_bounds)
         timed_out_regions = []
@@ -425,20 +570,26 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                     process.kill()  # Force kill if still alive
                     process.join()
 
-                # If below threshold, mark as timed out; otherwise split and continue
+                # If below threshold, mark as timed out; otherwise check if children would be below threshold
                 if width <= threshold:
                     print(f"{indent}⏱ Region at minimum granularity - marking as timed out")
                     timed_out_regions.append({'param_bounds': current_bounds, 'depth': depth})
                 else:
-                    print(f"{indent}Splitting timed-out region to continue exploration...")
+                    # Compute hypothetical child widths before splitting
                     max_dim = max(range(len(current_bounds)),
                                  key=lambda d: current_bounds[d][1] - current_bounds[d][0])
-
                     left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
+                    child_width = compute_width(left_bounds)  # Both children have same width after split
 
-                    # Add children to queue
-                    queue.append((left_bounds, depth + 1))
-                    queue.append((right_bounds, depth + 1))
+                    if child_width <= threshold:
+                        # Children would be below threshold - mark current region as timed out instead
+                        print(f"{indent}⏱ Children would be below threshold ({child_width:.6f} <= {threshold}) - marking as timed out")
+                        timed_out_regions.append({'param_bounds': current_bounds, 'depth': depth})
+                    else:
+                        print(f"{indent}Splitting timed-out region to continue exploration...")
+                        # Add children to queue
+                        queue.append((left_bounds, depth + 1))
+                        queue.append((right_bounds, depth + 1))
                 continue
 
             # Process completed - get the result
@@ -464,15 +615,20 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 # Don't add children
 
             else:
-                print(f"{indent}Splitting region...")
+                # Check if children would be below threshold before splitting
                 max_dim = max(range(len(current_bounds)),
                              key=lambda d: current_bounds[d][1] - current_bounds[d][0])
-
                 left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
+                child_width = compute_width(left_bounds)
 
-                # Add children to queue
-                queue.append((left_bounds, depth + 1))
-                queue.append((right_bounds, depth + 1))
+                if child_width <= threshold:
+                    print(f"{indent}✗ UNSAT - children would be below threshold ({child_width:.6f} <= {threshold})")
+                    # Don't add children
+                else:
+                    print(f"{indent}Splitting region...")
+                    # Add children to queue
+                    queue.append((left_bounds, depth + 1))
+                    queue.append((right_bounds, depth + 1))
 
         models = sat_regions
 
@@ -565,12 +721,18 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 elif width <= threshold:
                     print(f"{indent}[Demonic] ✗ UNSAT (below threshold)")
                 else:
-                    print(f"{indent}[Demonic] Splitting region...")
+                    # Check if children would be below threshold before splitting
                     max_dim = max(range(len(current_bounds)),
                                  key=lambda d: current_bounds[d][1] - current_bounds[d][0])
                     left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
-                    queue.append((left_bounds, depth + 1))
-                    queue.append((right_bounds, depth + 1))
+                    child_width = compute_width(left_bounds)
+
+                    if child_width <= threshold:
+                        print(f"{indent}[Demonic] ✗ UNSAT - children would be below threshold ({child_width:.6f} <= {threshold})")
+                    else:
+                        print(f"{indent}[Demonic] Splitting region...")
+                        queue.append((left_bounds, depth + 1))
+                        queue.append((right_bounds, depth + 1))
             else:
                 # With timeout - use subprocess
                 print(f"{indent}[Demonic] Running PolyQnt solver (timeout: {cutoff_time}s)...")
@@ -597,12 +759,20 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                         print(f"{indent}[Demonic] ⏱ Region at minimum granularity - marking as timed out")
                         demonic_timed_out.append({'param_bounds': current_bounds, 'depth': depth})
                     else:
-                        print(f"{indent}[Demonic] Splitting timed-out region...")
+                        # Compute hypothetical child widths before splitting
                         max_dim = max(range(len(current_bounds)),
                                      key=lambda d: current_bounds[d][1] - current_bounds[d][0])
                         left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
-                        queue.append((left_bounds, depth + 1))
-                        queue.append((right_bounds, depth + 1))
+                        child_width = compute_width(left_bounds)
+
+                        if child_width <= threshold:
+                            # Children would be below threshold - mark current region as timed out instead
+                            print(f"{indent}[Demonic] ⏱ Children would be below threshold ({child_width:.6f} <= {threshold}) - marking as timed out")
+                            demonic_timed_out.append({'param_bounds': current_bounds, 'depth': depth})
+                        else:
+                            print(f"{indent}[Demonic] Splitting timed-out region...")
+                            queue.append((left_bounds, depth + 1))
+                            queue.append((right_bounds, depth + 1))
                     continue
 
                 try:
@@ -624,12 +794,18 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 elif width <= threshold:
                     print(f"{indent}[Demonic] ✗ UNSAT (below threshold)")
                 else:
-                    print(f"{indent}[Demonic] Splitting region...")
+                    # Check if children would be below threshold before splitting
                     max_dim = max(range(len(current_bounds)),
                                  key=lambda d: current_bounds[d][1] - current_bounds[d][0])
                     left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
-                    queue.append((left_bounds, depth + 1))
-                    queue.append((right_bounds, depth + 1))
+                    child_width = compute_width(left_bounds)
+
+                    if child_width <= threshold:
+                        print(f"{indent}[Demonic] ✗ UNSAT - children would be below threshold ({child_width:.6f} <= {threshold})")
+                    else:
+                        print(f"{indent}[Demonic] Splitting region...")
+                        queue.append((left_bounds, depth + 1))
+                        queue.append((right_bounds, depth + 1))
 
     print(f"\n{'='*80}")
     print(f"DEMONIC REFINEMENT COMPLETE")
@@ -658,7 +834,13 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         print(f"Filtered out {len(all_timed_out) - len(truly_inconclusive)} timed-out regions "
               f"that are contained in winning regions.")
 
-    return angelic_regions, demonic_regions, truly_inconclusive
+    # Merge adjacent inconclusive regions
+    merged_inconclusive = merge_adjacent_regions(truly_inconclusive)
+
+    if len(truly_inconclusive) != len(merged_inconclusive):
+        print(f"Merged {len(truly_inconclusive)} inconclusive regions into {len(merged_inconclusive)} regions.")
+
+    return angelic_regions, demonic_regions, merged_inconclusive
 
 
 def main():
@@ -692,13 +874,18 @@ def main():
         if cutoff_time is not None:
             print(f"Anytime mode enabled with cutoff time: {cutoff_time} seconds per query.")
 
+        start_time = time.time()
+
         angelic_regions, demonic_regions, timed_out_regions = refine_parameter_space(
             config, entailment_solver, degree, smt_solver, threshold, parallel, cutoff_time
         )
 
+        runtime = time.time() - start_time
+
         print(f"\n{'='*80}")
         print("FINAL SUMMARY")
         print(f"{'='*80}")
+        print(f"Total runtime: {runtime:.2f} seconds")
 
         print(f"\n--- ANGELIC WINNING REGIONS ---")
         print(f"(Exists controller satisfying the specification)")
@@ -719,7 +906,7 @@ def main():
             print(f"    Certificate: {model_info['model']}")
 
         if timed_out_regions:
-            print(f"\n--- INCONCLUSIVE REGIONS (Timed Out) ---")
+            print(f"\n--- INCONCLUSIVE REGIONS (Merged) ---")
             print(f"(Neither angelic nor demonic winning determined)")
             print(f"Total: {len(timed_out_regions)}")
             for i, region_info in enumerate(timed_out_regions, 1):
@@ -727,8 +914,14 @@ def main():
 
         print(f"\n{'='*80}\n")
 
+        # Write to logfile if specified
+        logfile = config.get('logfile')
+        if logfile:
+            write_to_logfile(logfile, config_file, angelic_regions, demonic_regions,
+                           timed_out_regions, runtime)
+
         return angelic_regions, demonic_regions, timed_out_regions
-    
+
     else:
         # Create tmp directory if it doesn't exist
         os.makedirs('./tmp', exist_ok=True)

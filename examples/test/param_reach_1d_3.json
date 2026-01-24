@@ -12,16 +12,16 @@
       "bounds": [[2, 3]]
     },
     "dynamics": [
-      {
+     {
         "condition": "-2 <= S1 <= 0",
         "transforms": {"S1": "(+ S1 0)"}
       },
       {
-        "condition": "-2 <= S1 <= 9",
+        "condition": "0 <= S1 <= 9",
         "transforms": {"S1": "(+ (* S1 S1) (+ U1 (+ W1 P1)))"}
       },
       {
-        "condition": "9 <= S1 <= 100",
+        "condition": "10 <= S1 <= 100",
         "transforms": {"S1": "(+ S1 (+ U1 (+ W1 P1)))"}
       },
       {
@@ -39,9 +39,9 @@
   },
   "enable_param_refinement": false,
   "param_refinement_threshold": 0.1,
-  "cutoff_time_per_smt_query": 300,
+  "cutoff_time_per_smt_query": 30,
   "parallel_refinement": true,
-  "target_probability": 1,
+  "target_probability": 0.001,
   "degree": 2,
   "smt_solver": "mathsat",
   "entailment_solver": "handelman",

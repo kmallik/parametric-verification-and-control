@@ -6,7 +6,7 @@
     "noise_vars": ["W1"],
     "control_vars": ["U1"],
     "state_bounds": [[-2, 150], [-2, 150]],
-    "param_bounds": [[0.5, 1.0]],
+    "param_bounds": [[0.9, 1.0]],
     "control_bounds":[[0, 0.6]],
     "initial_region": {
       "bounds": [[2, 3], [2,3]]
@@ -86,7 +86,7 @@
   },
   "enable_param_refinement": false,
   "param_refinement_threshold": 0.25,
-  "cutoff_time_per_smt_query": 10,
+  "cutoff_time_per_smt_query": 300,
   "parallel_refinement": true,
   "target_probability": 1,
   "degree": 1,

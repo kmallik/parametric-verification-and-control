@@ -1,0 +1,10 @@
+# Parametric Verification and Control
+# Python 3.12+ recommended
+
+# Main dependency - SMT solver interface
+polyqent>=0.0.15
+
+# Dependencies of polyqent (included for reproducibility)
+numpy>=2.0.0
+PySMT>=0.9.6
+lark>=1.3.0

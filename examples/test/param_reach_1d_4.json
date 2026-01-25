@@ -2,13 +2,17 @@
     "system": {
         "type": "cartesian",
         "state_vars": ["S1"],
+        "param_vars": ["P1"],
         "noise_vars": ["W1"],
         "control_vars": ["U1"],
         "state_bounds": [
             [-2, 150]
         ],
+        "param_bounds": [
+            [0.9, 1.0]
+        ],
         "control_bounds": [
-            [-1, 1]
+            [0, 0.6]
         ],
         "initial_region": {
             "bounds": [
@@ -19,39 +23,47 @@
             {
                 "condition": "-2 <= S1 <= 0",
                 "transforms": {
-                    "S1": "+ S1 0"
+                    "S1": "(+ S1 0)"
                 }
             },
             {
-                "condition": "0 <= S1 <= 100",
+                "condition": "0 <= S1 <= 9",
                 "transforms": {
-                    "S1": "(+ S1 (+ W1 U1))"
+                    "S1": "(+ (* S1 S1) (+ U1 (* W1 P1)))"
+                }
+            },
+            {
+                "condition": "9 <= S1 <= 100",
+                "transforms": {
+                    "S1": "(+ S1 (+ U1 (* W1 P1)))"
                 }
             },
             {
                 "condition": "S1 >= 100",
                 "transforms": {
-                    "S1": "+ S1 0"
+                    "S1": "(+ S1 0)"
                 }
             }
         ],
         "noise_distribution": {
             "type": "uniform",
             "params": {
-                "lower": [-1],
-                "upper": [1]
+                "lower": [-0.75],
+                "upper": [-0.25]
             }
         }
     },
-    "unsafe_region": {
+    "target_region": {
         "bounds": [
             [90, 150]
         ]
     },
-    "target_probability": 0.9,
-    "degree": 1,
-    "smt_solver": "z3",
-    "entailment_solver": "farkas",
+    "param_refinement_threshold": 0.1,
+    "cutoff_time_per_smt_query": 300,
+    "target_probability": 0.99999,
+    "degree": 2,
+    "smt_solver": "mathsat",
+    "entailment_solver": "handelman",
     "output_smt_path": "./tmp/temporary_polyhorn_input.smt2",
     "refinement_mode": 2,
     "logfile": "./results.log"

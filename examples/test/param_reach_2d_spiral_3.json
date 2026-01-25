@@ -4,47 +4,50 @@
         "state_vars": ["S1", "S2"],
         "param_vars": ["P1"],
         "noise_vars": ["W1"],
-        "control_vars": ["U1"],
         "state_bounds": [
-            [-2, 150],
-            [0, 100]
+            [-2.2, 2.2],
+            [-2.2, 2.2]
         ],
         "param_bounds": [
-            [-1.0, 1.0]
-        ],
-        "control_bounds": [
-            [0, 0.6]
+            [-1.0, 1.1]
         ],
         "initial_region": {
             "bounds": [
-                [2, 3],
-                [0, 1]
+                [-1.0, -0.8],
+                [-1.0, -0.8]
             ]
         },
         "dynamics": [
             {
-                "condition": "-2 <= S1 <= 0",
+                "condition": "-2 <= S1 <= 2 and -2 <= S2 <= 2",
+                "transforms": {
+                    "S1": "(+ (* 0.1 S1) (* -0.1 S2))",
+                    "S2": "(+ (* 0.1 S1) (* 0.1 S2))"
+                }
+            },
+            {
+                "condition": "S1 <= -2 and S2 <= -2",
                 "transforms": {
                     "S1": "(+ S1 0)",
                     "S2": "(+ S2 0)"
                 }
             },
             {
-                "condition": "0 <= S1 <= 100 and S2 <= 90",
-                "transforms": {
-                    "S1": "(+ (* 2 S1) (+ U1 (+ W1 P1)))",
-                    "S2": "(+ S2 1)"
-                }
-            },
-            {
-                "condition": "S1 >= 100",
+                "condition": "S1 <= -2 and S2 >= 2",
                 "transforms": {
                     "S1": "(+ S1 0)",
                     "S2": "(+ S2 0)"
                 }
             },
             {
-                "condition": "S2 >= 90",
+                "condition": "S1 >= 2 and S2 <= -2",
+                "transforms": {
+                    "S1": "(+ S1 0)",
+                    "S2": "(+ S2 0)"
+                }
+            },
+            {
+                "condition": "S1 >= 2 and S2 >= 2",
                 "transforms": {
                     "S1": "(+ S1 0)",
                     "S2": "(+ S2 0)"
@@ -54,24 +57,24 @@
         "noise_distribution": {
             "type": "uniform",
             "params": {
-                "lower": [-0.75],
-                "upper": [-0.25]
+                "lower": [-0.01],
+                "upper": [0.01]
             }
         }
     },
     "target_region": {
         "bounds": [
-            [90, 150],
-            [0, 100]
+            [-0.1, 0.1],
+            [-0.1, 0.1]
         ]
     },
     "param_refinement_threshold": 0.1,
-    "cutoff_time_per_smt_query": 50,
-    "target_probability": 0.9,
-    "degree": 1,
+    "cutoff_time_per_smt_query": 300,
+    "target_probability": 1,
+    "degree": 2,
     "smt_solver": "mathsat",
-    "entailment_solver": "farkas",
+    "entailment_solver": "handelman",
     "output_smt_path": "./tmp/temporary_polyhorn_input.smt2",
-    "refinement_mode": 2,
+    "refinement_mode": "none",
     "logfile": "./results.log"
 }

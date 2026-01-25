@@ -1,43 +1,59 @@
 {
-  "system": {
-    "type": "cartesian",
-    "state_vars": ["S1", "S2"],
-    "param_vars": ["P1", "P2"],
-    "noise_vars": ["W1"],
-    "state_bounds": [[-10, 10], [-1, 2]],
-    "param_bounds": [[-1.0, 1.0], [-1.0, 1.0]],
-    "initial_region": {
-      "bounds": [[0.0, 1.0], [0.999, 1.111]]
+    "system": {
+        "type": "cartesian",
+        "state_vars": ["S1", "S2"],
+        "param_vars": ["P1", "P2"],
+        "noise_vars": ["W1"],
+        "state_bounds": [
+            [-10, 10],
+            [-1, 2]
+        ],
+        "param_bounds": [
+            [-1.0, 1.0],
+            [-1.0, 1.0]
+        ],
+        "initial_region": {
+            "bounds": [
+                [0.0, 1.0],
+                [0.999, 1.111]
+            ]
+        },
+        "dynamics": [
+            {
+                "condition": "S2 >= -0.5",
+                "transforms": {
+                    "S1": "(+ P1 (+ S1 (* P2 W1)))",
+                    "S2": "(+ S2 -1)"
+                }
+            },
+            {
+                "condition": "S2 <= -0.5",
+                "transforms": {
+                    "S1": "(+ S1 0)",
+                    "S2": "(+ S2 0)"
+                }
+            }
+        ],
+        "noise_distribution": {
+            "type": "uniform",
+            "params": {
+                "lower": [0],
+                "upper": [1]
+            }
+        }
     },
-    "dynamics": [
-      {
-        "condition": "S2 >= -0.5",
-        "transforms": {
-          "S1": "(+ P1 (+ S1 (* P2 W1)))",
-          "S2": "(+ S2 -1)"
-        }
-      },
-      {
-        "condition": "S2 <= -0.5",
-        "transforms": {
-          "S1": "(+ S1 0)",
-          "S2": "(+ S2 0)"
-        }
-      }
-    ],
-    "noise_distribution": {
-      "type": "uniform",
-      "params": {"lower": [0], "upper": [1]}
-    }
-  },
-  "target_region": {
-    "bounds": [[0.0, 1.0], [-0.111, 0.111]]
-  },
-  "enable_param_refinement": true,
-  "param_refinement_threshold": 0.1,
-  "target_probability": 1.0,
-  "degree": 1,
-  "smt_solver": "z3",
-  "entailment_solver": "farkas",
-  "output_smt_path": "./tmp/temporary_polyhorn_input.smt2"
+    "target_region": {
+        "bounds": [
+            [0.0, 1.0],
+            [-0.111, 0.111]
+        ]
+    },
+    "param_refinement_threshold": 0.1,
+    "target_probability": 1.0,
+    "degree": 1,
+    "smt_solver": "z3",
+    "entailment_solver": "farkas",
+    "output_smt_path": "./tmp/temporary_polyhorn_input.smt2",
+    "refinement_mode": 2,
+    "logfile": "./results.log"
 }

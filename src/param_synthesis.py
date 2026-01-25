@@ -235,13 +235,20 @@ def merge_adjacent_regions(regions: List[Dict]) -> List[Dict]:
 
 def write_to_logfile(logfile: str, config_file: str, angelic_regions: List[Dict],
                      demonic_regions: List[Dict], inconclusive_regions: List[Dict],
-                     runtime: float) -> None:
+                     runtime: float, refinement_mode: Optional[int] = None) -> None:
     """Write experimental results to a logfile.
 
     Appends the results to the logfile, creating it if it doesn't exist.
-    Includes date, time, input filename, runtime, and experimental results.
+    Includes date, time, input filename, runtime, refinement mode, and experimental results.
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    mode_descriptions = {
+        0: "Mode 0: Sequential (angelic first, then demonic on complement)",
+        1: "Mode 1: Parallel children exploration (angelic first, then demonic)",
+        2: "Mode 2: Parallel angelic/demonic per region",
+        None: "No refinement (single query)"
+    }
 
     with open(logfile, 'a') as f:
         f.write(f"\n{'='*80}\n")
@@ -249,6 +256,7 @@ def write_to_logfile(logfile: str, config_file: str, angelic_regions: List[Dict]
         f.write(f"{'='*80}\n")
         f.write(f"Date/Time: {timestamp}\n")
         f.write(f"Input file: {config_file}\n")
+        f.write(f"Refinement mode: {mode_descriptions.get(refinement_mode, f'Unknown ({refinement_mode})')}\n")
         f.write(f"Total runtime: {runtime:.2f} seconds\n")
         f.write(f"\n")
 
@@ -363,7 +371,7 @@ def compute_complement_regions(angelic_regions: List[Dict], initial_bounds: List
 
 def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                           degree: int, smt_solver: str, threshold: float = 0.01,
-                          parallel: bool = False,
+                          refinement_mode: int = 0,
                           cutoff_time: Optional[float] = None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """Iteratively refine parameter space to find angelic and demonic winning regions.
 
@@ -376,7 +384,10 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         degree: Polynomial degree
         smt_solver: SMT solver to use
         threshold: Refinement threshold
-        parallel: If True, explore children in parallel; if False, use serial exploration
+        refinement_mode: Refinement mode:
+            0 - Sequential: all angelic first, then all demonic on complement
+            1 - Parallel children: parallel exploration of children regions, angelic first then demonic
+            2 - Parallel angelic/demonic: run angelic and demonic per region simultaneously
         cutoff_time: Optional timeout in seconds for each SMT query. If None, no timeout.
 
     Returns:
@@ -434,7 +445,200 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
             _file_counter += 1
             return _file_counter
 
-    # If no cutoff time, use the original recursive approach
+    # Mode 2: run angelic and demonic queries in parallel for each region
+    if refinement_mode == 2:
+        from collections import deque
+
+        print("REFINEMENT MODE 2: Running angelic and demonic queries simultaneously per region")
+        print("A region can be angelic OR demonic winning, but not both.")
+        print(f"{'='*80}\n")
+
+        queue = deque([(initial_param_bounds, 0)])
+        angelic_regions = []
+        demonic_regions = []
+        timed_out_regions = []
+
+        while queue:
+            current_bounds, depth = queue.popleft()
+            indent = "  " * depth
+            width = compute_width(current_bounds)
+
+            print(f"{indent}Exploring region: {current_bounds} (width: {width:.6f})")
+
+            # Early threshold check
+            if width <= threshold:
+                print(f"{indent}✗ Below threshold - marking as inconclusive")
+                timed_out_regions.append({'param_bounds': current_bounds, 'depth': depth})
+                continue
+
+            # Run angelic and demonic queries in parallel
+            file_id_angelic = get_unique_file_id()
+            file_id_demonic = get_unique_file_id()
+
+            angelic_queue = multiprocessing.Queue()
+            demonic_queue = multiprocessing.Queue()
+
+            angelic_args = (current_bounds, config, entailment_solver, degree, smt_solver, file_id_angelic)
+            demonic_args = (current_bounds, config, entailment_solver, degree, smt_solver, file_id_demonic)
+
+            angelic_process = multiprocessing.Process(
+                target=_run_smt_query_worker,
+                args=(angelic_args, angelic_queue)
+            )
+            demonic_process = multiprocessing.Process(
+                target=_run_dual_smt_query_worker,
+                args=(demonic_args, demonic_queue)
+            )
+
+            print(f"{indent}Running angelic and demonic queries in parallel...")
+            angelic_process.start()
+            demonic_process.start()
+
+            # Poll both processes until one returns SAT or both complete
+            angelic_result = None
+            demonic_result = None
+            angelic_done = False
+            demonic_done = False
+            found_sat = False  # Track if we found a SAT result (no need to split)
+
+            effective_timeout = cutoff_time if cutoff_time is not None else 600  # 10 min default
+
+            start_time = time.time()
+            while not (angelic_done and demonic_done):
+                elapsed = time.time() - start_time
+                if elapsed > effective_timeout:
+                    # Timeout - terminate both
+                    print(f"{indent}⏱ TIMEOUT")
+                    if angelic_process.is_alive():
+                        angelic_process.terminate()
+                    if demonic_process.is_alive():
+                        demonic_process.terminate()
+                    break
+
+                # Check angelic
+                if not angelic_done and not angelic_process.is_alive():
+                    angelic_done = True
+                    try:
+                        angelic_result = angelic_queue.get_nowait()
+                    except:
+                        angelic_result = ('error', 'No result', None)
+
+                    if angelic_result[0] == 'success' and angelic_result[1] == 'sat':
+                        # Angelic SAT - terminate demonic and record
+                        print(f"{indent}✓ ANGELIC SAT - terminating demonic query")
+                        if demonic_process.is_alive():
+                            demonic_process.terminate()
+                            demonic_process.join(timeout=1)
+                            if demonic_process.is_alive():
+                                demonic_process.kill()
+                        angelic_regions.append({
+                            'param_bounds': current_bounds,
+                            'model': angelic_result[2],
+                            'is_sat': 'sat'
+                        })
+                        found_sat = True
+                        break
+
+                # Check demonic
+                if not demonic_done and not demonic_process.is_alive():
+                    demonic_done = True
+                    try:
+                        demonic_result = demonic_queue.get_nowait()
+                    except:
+                        demonic_result = ('error', 'No result', None)
+
+                    if demonic_result[0] == 'success' and demonic_result[1] == 'sat':
+                        # Demonic SAT - terminate angelic and record
+                        print(f"{indent}✓ DEMONIC SAT - terminating angelic query")
+                        if angelic_process.is_alive():
+                            angelic_process.terminate()
+                            angelic_process.join(timeout=1)
+                            if angelic_process.is_alive():
+                                angelic_process.kill()
+                        demonic_regions.append({
+                            'param_bounds': current_bounds,
+                            'model': demonic_result[2],
+                            'is_sat': 'sat'
+                        })
+                        found_sat = True
+                        break
+
+                time.sleep(0.1)  # Small delay to avoid busy waiting
+
+            # Clean up processes
+            angelic_process.join(timeout=1)
+            demonic_process.join(timeout=1)
+
+            # Skip splitting if we already found a SAT result for this region
+            if found_sat:
+                continue
+
+            # Check final state if both completed without SAT
+            if angelic_done and demonic_done:
+                angelic_sat = angelic_result and angelic_result[0] == 'success' and angelic_result[1] == 'sat'
+                demonic_sat = demonic_result and demonic_result[0] == 'success' and demonic_result[1] == 'sat'
+
+                if not angelic_sat and not demonic_sat:
+                    # Both UNSAT - need to split
+                    max_dim = max(range(len(current_bounds)),
+                                 key=lambda d: current_bounds[d][1] - current_bounds[d][0])
+                    left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
+                    child_width = compute_width(left_bounds)
+
+                    if child_width <= threshold:
+                        print(f"{indent}✗ Both UNSAT - children would be below threshold, marking as inconclusive")
+                        timed_out_regions.append({'param_bounds': current_bounds, 'depth': depth})
+                    else:
+                        print(f"{indent}✗ Both UNSAT - splitting region...")
+                        queue.append((left_bounds, depth + 1))
+                        queue.append((right_bounds, depth + 1))
+            elif not angelic_done or not demonic_done:
+                # Timeout occurred before both completed
+                # Check if children would be below threshold
+                max_dim = max(range(len(current_bounds)),
+                             key=lambda d: current_bounds[d][1] - current_bounds[d][0])
+                left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
+                child_width = compute_width(left_bounds)
+
+                if child_width <= threshold:
+                    print(f"{indent}⏱ Timeout at minimum granularity - marking as inconclusive")
+                    timed_out_regions.append({'param_bounds': current_bounds, 'depth': depth})
+                else:
+                    print(f"{indent}⏱ Timeout - splitting to continue exploration...")
+                    queue.append((left_bounds, depth + 1))
+                    queue.append((right_bounds, depth + 1))
+
+        # Skip the separate angelic/demonic phases - we've done both simultaneously
+        print(f"\n{'='*80}")
+        print(f"PARALLEL REFINEMENT COMPLETE")
+        print(f"{'='*80}")
+        print(f"Total angelic winning regions found: {len(angelic_regions)}")
+        for i, model_info in enumerate(angelic_regions, 1):
+            print(f"  Region {i}: {model_info['param_bounds']}")
+        print(f"\nTotal demonic winning regions found: {len(demonic_regions)}")
+        for i, model_info in enumerate(demonic_regions, 1):
+            print(f"  Region {i}: {model_info['param_bounds']}")
+        if timed_out_regions:
+            print(f"\nInconclusive regions: {len(timed_out_regions)}")
+            for i, region_info in enumerate(timed_out_regions, 1):
+                print(f"  Region {i}: {region_info['param_bounds']}")
+        print(f"{'='*80}\n")
+
+        # Merge adjacent inconclusive regions
+        merged_inconclusive = merge_adjacent_regions(timed_out_regions)
+        if len(timed_out_regions) != len(merged_inconclusive):
+            print(f"Merged {len(timed_out_regions)} inconclusive regions into {len(merged_inconclusive)} regions.")
+
+        return angelic_regions, demonic_regions, merged_inconclusive
+
+    # Mode 0 and Mode 1: Sequential phases (angelic first, then demonic on complement)
+    # Mode 0: Serial exploration of children
+    # Mode 1: Parallel exploration of children using multiprocessing
+    mode_desc = "MODE 0 (Sequential)" if refinement_mode == 0 else "MODE 1 (Parallel children)"
+    print(f"REFINEMENT {mode_desc}: Angelic phase first, then demonic on complement")
+    print(f"{'='*80}\n")
+
+    # If no cutoff time, use the recursive approach
     if cutoff_time is None:
         def explore_region(current_bounds: List[Tuple[float, float]], depth: int = 0) -> List[Dict]:
             """Recursively explore parameter region."""
@@ -503,20 +707,18 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
 
             print(f"{indent}Splitting region...")
 
-            if parallel:
-                # Explore both children in parallel
+            if refinement_mode == 1:
+                # Mode 1: Parallel exploration of children
                 print(f"{indent}Exploring both children in parallel...")
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     left_future = executor.submit(explore_region, left_bounds, depth + 1)
                     right_future = executor.submit(explore_region, right_bounds, depth + 1)
-
                     left_models = left_future.result()
                     right_models = right_future.result()
             else:
-                # Serial exploration
+                # Mode 0: Serial exploration
                 print(f"{indent}Exploring left child...")
                 left_models = explore_region(left_bounds, depth + 1)
-
                 print(f"{indent}Exploring right child...")
                 right_models = explore_region(right_bounds, depth + 1)
 
@@ -858,26 +1060,34 @@ def main():
     output_path = config.get('output_smt_path', './tmp/temporary_polyhorn_input.smt2')
 
     param_vars = config['system'].get('param_vars', [])
-    enable_refinement = config.get('enable_param_refinement', False)
+    refinement_mode_raw = config.get('refinement_mode', None)
 
-    if param_vars and 'param_bounds' in config['system'] and enable_refinement:
+    # Handle "none"/"None" string as no refinement
+    if refinement_mode_raw is None or (isinstance(refinement_mode_raw, str) and refinement_mode_raw.lower() == 'none'):
+        refinement_mode = None
+    else:
+        refinement_mode = int(refinement_mode_raw)
+
+    # Run parameter space refinement if refinement_mode is specified (0, 1, or 2)
+    if refinement_mode is not None and param_vars and 'param_bounds' in config['system']:
         print("Parameter space refinement enabled.")
         threshold = config.get('param_refinement_threshold', 0.01)
-        parallel = config.get('parallel_refinement', False)
         cutoff_time = config.get('cutoff_time_per_smt_query', None)
 
-        if parallel:
-            print("Using parallel refinement mode.")
-        else:
-            print("Using serial refinement mode.")
+        mode_descriptions = {
+            0: "MODE 0: Sequential (angelic first, then demonic on complement)",
+            1: "MODE 1: Parallel children exploration (angelic first, then demonic)",
+            2: "MODE 2: Parallel angelic/demonic per region"
+        }
+        print(mode_descriptions.get(refinement_mode, f"Unknown mode: {refinement_mode}"))
 
         if cutoff_time is not None:
-            print(f"Anytime mode enabled with cutoff time: {cutoff_time} seconds per query.")
+            print(f"Cutoff time per SMT query: {cutoff_time} seconds")
 
         start_time = time.time()
 
         angelic_regions, demonic_regions, timed_out_regions = refine_parameter_space(
-            config, entailment_solver, degree, smt_solver, threshold, parallel, cutoff_time
+            config, entailment_solver, degree, smt_solver, threshold, refinement_mode, cutoff_time
         )
 
         runtime = time.time() - start_time
@@ -918,7 +1128,7 @@ def main():
         logfile = config.get('logfile')
         if logfile:
             write_to_logfile(logfile, config_file, angelic_regions, demonic_regions,
-                           timed_out_regions, runtime)
+                           timed_out_regions, runtime, refinement_mode)
 
         return angelic_regions, demonic_regions, timed_out_regions
 
@@ -939,25 +1149,46 @@ def main():
         has_target = 'target_region' in config
         has_unsafe = 'unsafe_region' in config
         target_probability = config.get('target_probability', 1.0)
+        mode = config.get('mode', 'angelic')  # Default to angelic mode
 
-        # Determine which type of specification
-        if has_target and not has_unsafe:
-            # Reachability specification
-            if target_probability < 1.0:
-                print(f"Generating SMT file for quantitative reachability (probability: {target_probability})...")
-                generator.generate_smt_file_quantitative_reach_simplified(config, output_path)
+        # Check for demonic mode
+        if mode == 'demonic':
+            print("Running in DEMONIC mode (dual problem).")
+            # For demonic mode, use dual probability
+            dual_target_probability = 1.0 - target_probability
+            dual_config = config.copy()
+            dual_config['target_probability'] = dual_target_probability
+
+            if has_target and not has_unsafe:
+                # Dual reachability specification
+                print(f"Generating SMT file for dual reachability (probability: {dual_target_probability})...")
+                generator.generate_smt_file_dual_reach_simplified(dual_config, output_path)
+            elif has_unsafe and not has_target:
+                # Dual safety specification
+                print(f"Generating SMT file for dual safety (probability: {dual_target_probability})...")
+                generator.generate_smt_file_dual_safety_simplified(dual_config, output_path)
             else:
-                print(f"Generating SMT file for qualitative (almost-sure) reachability...")
-                generator.generate_smt_file_qualitative_reach_simplified(config, output_path)
-        elif has_unsafe and not has_target:
-            # Safety specification
-            if target_probability < 1.0:
-                print(f"Generating SMT file for quantitative safety (probability: {target_probability})...")
-                generator.generate_smt_file_quantitative_safety_simplified(config, output_path)
-            else:
-                raise NotImplementedError("Qualitative safety (target_probability = 1) not yet implemented")
+                raise ValueError("Must specify either 'target_region' or 'unsafe_region', but not both")
         else:
-            raise ValueError("Must specify either 'target_region' or 'unsafe_region', but not both")
+            # Angelic mode (default)
+            # Determine which type of specification
+            if has_target and not has_unsafe:
+                # Reachability specification
+                if target_probability < 1.0:
+                    print(f"Generating SMT file for quantitative reachability (probability: {target_probability})...")
+                    generator.generate_smt_file_quantitative_reach_simplified(config, output_path)
+                else:
+                    print(f"Generating SMT file for qualitative (almost-sure) reachability...")
+                    generator.generate_smt_file_qualitative_reach_simplified(config, output_path)
+            elif has_unsafe and not has_target:
+                # Safety specification
+                if target_probability < 1.0:
+                    print(f"Generating SMT file for quantitative safety (probability: {target_probability})...")
+                    generator.generate_smt_file_quantitative_safety_simplified(config, output_path)
+                else:
+                    raise NotImplementedError("Qualitative safety (target_probability = 1) not yet implemented")
+            else:
+                raise ValueError("Must specify either 'target_region' or 'unsafe_region', but not both")
 
         config_path = "./tmp/temporary_polyhorn_config.json"
         generator.generate_config_file(entailment_solver, degree, smt_solver, output_path, config_path)

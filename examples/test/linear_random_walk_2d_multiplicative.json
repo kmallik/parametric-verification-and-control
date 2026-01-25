@@ -1,63 +1,75 @@
 {
     "system": {
         "type": "cartesian",
-        "state_vars": ["S1"],
+        "state_vars": ["S1", "S2"],
         "param_vars": ["P1"],
         "noise_vars": ["W1"],
         "control_vars": ["U1"],
         "state_bounds": [
-            [-2, 150]
+            [-2, 150],
+            [0, 100]
         ],
         "param_bounds": [
-            [0.0, 3.0]
+            [-1.0, 1.0]
         ],
         "control_bounds": [
-            [-1, 1]
+            [0, 0.6]
         ],
         "initial_region": {
             "bounds": [
-                [2, 3]
+                [2, 3],
+                [0, 1]
             ]
         },
         "dynamics": [
             {
                 "condition": "-2 <= S1 <= 0",
                 "transforms": {
-                    "S1": "(+ S1 0)"
+                    "S1": "(+ S1 0)",
+                    "S2": "(+ S2 0)"
                 }
             },
             {
-                "condition": "0 <= S1 <= 100",
+                "condition": "0 <= S1 <= 100 and S2 <= 90",
                 "transforms": {
-                    "S1": "(+ S1 (+ U1 (+ W1 P1)))"
+                    "S1": "(+ (* 1.9 S1) (+ U1 (* W1 P1)))",
+                    "S2": "(+ S2 1)"
                 }
             },
             {
                 "condition": "S1 >= 100",
                 "transforms": {
-                    "S1": "(+ S1 0)"
+                    "S1": "(+ S1 0)",
+                    "S2": "(+ S2 0)"
+                }
+            },
+            {
+                "condition": "S2 >= 90",
+                "transforms": {
+                    "S1": "(+ S1 0)",
+                    "S2": "(+ S2 0)"
                 }
             }
         ],
         "noise_distribution": {
             "type": "uniform",
             "params": {
-                "lower": [-1],
-                "upper": [1]
+                "lower": [-0.75],
+                "upper": [-0.25]
             }
         }
     },
-    "unsafe_region": {
+    "target_region": {
         "bounds": [
-            [90, 150]
+            [90, 150],
+            [0, 100]
         ]
     },
-    "simplified_parametric": true,
-    "param_refinement_threshold": 0.1,
-    "cutoff_time_per_smt_query": 10,
-    "target_probability": 0.95,
+    "param_refinement_threshold": 0.05,
+    "cutoff_time_per_smt_query": 30,
+    "target_probability": 0.9,
     "degree": 1,
-    "smt_solver": "z3",
+    "smt_solver": "mathsat",
     "entailment_solver": "farkas",
     "output_smt_path": "./tmp/temporary_polyhorn_input.smt2",
     "refinement_mode": 2,

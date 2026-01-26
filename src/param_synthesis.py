@@ -240,7 +240,23 @@ def write_to_logfile(logfile: str, config_file: str, angelic_regions: List[Dict]
 
     Appends the results to the logfile, creating it if it doesn't exist.
     Includes date, time, input filename, runtime, refinement mode, and experimental results.
+    Experiment entries are numbered sequentially.
     """
+    import re
+
+    # Determine the next experiment number by reading existing entries
+    experiment_num = 1
+    if os.path.exists(logfile):
+        try:
+            with open(logfile, 'r') as f:
+                content = f.read()
+                # Find all experiment numbers in the file
+                matches = re.findall(r'EXPERIMENT #(\d+)', content)
+                if matches:
+                    experiment_num = max(int(m) for m in matches) + 1
+        except Exception:
+            pass  # If we can't read the file, start at 1
+
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     mode_descriptions = {
@@ -252,7 +268,7 @@ def write_to_logfile(logfile: str, config_file: str, angelic_regions: List[Dict]
 
     with open(logfile, 'a') as f:
         f.write(f"\n{'='*80}\n")
-        f.write(f"EXPERIMENT LOG ENTRY\n")
+        f.write(f"EXPERIMENT #{experiment_num}\n")
         f.write(f"{'='*80}\n")
         f.write(f"Date/Time: {timestamp}\n")
         f.write(f"Input file: {config_file}\n")

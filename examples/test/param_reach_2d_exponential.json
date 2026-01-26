@@ -71,9 +71,9 @@
     "param_refinement_threshold": 0.1,
     "cutoff_time_per_smt_query": 60,
     "target_probability": 0.9,
-    "degree": 2,
+    "degree": 1,
     "smt_solver": "z3",
-    "entailment_solver": "handelman",
+    "entailment_solver": "farkas",
     "output_smt_path": "./tmp/temporary_polyhorn_input.smt2",
     "refinement_mode": "none",
     "logfile": "./results.log"

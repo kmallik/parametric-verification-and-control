@@ -53,12 +53,14 @@
         ]
     },
     "param_refinement_threshold": 0.1,
+    "max_inconclusive": 0.5,
+    "overall_timeout": 600,
     "cutoff_time_per_smt_query": 10,
     "target_probability": 0.9,
     "degree": 1,
     "smt_solver": "mathsat",
     "entailment_solver": "farkas",
     "output_smt_path": "./tmp/temporary_polyhorn_input.smt2",
-    "refinement_mode": 2,
+    "refinement_mode": 3,
     "logfile": "./results.log"
 }

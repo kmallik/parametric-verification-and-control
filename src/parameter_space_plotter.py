@@ -33,6 +33,8 @@ def parse_logfile_entry(logfile: str, experiment_num: int) -> Dict[str, Any]:
         - angelic_regions: List of param_bounds
         - demonic_regions: List of param_bounds
         - inconclusive_regions: List of param_bounds
+
+    Only looks for new format entries ("EXPERIMENT #N"). Old format entries are ignored.
     """
     if not os.path.exists(logfile):
         raise FileNotFoundError(f"Logfile not found: {logfile}")
@@ -40,13 +42,25 @@ def parse_logfile_entry(logfile: str, experiment_num: int) -> Dict[str, Any]:
     with open(logfile, 'r') as f:
         content = f.read()
 
-    # Split content by experiment entries
-    # Find the specific experiment
-    pattern = rf'={80}\nEXPERIMENT #{experiment_num}\n={80}\n(.*?)(?=\n={80}\nEXPERIMENT #|\Z)'
+    # Find the specific experiment with "EXPERIMENT #N" format
+    # Use flexible matching for the separator line (any number of = signs)
+    pattern = rf'=+\nEXPERIMENT #{experiment_num}\n=+\n(.*?)(?=\n=+\nEXPERIMENT #|\Z)'
     match = re.search(pattern, content, re.DOTALL)
 
     if not match:
-        raise ValueError(f"Experiment #{experiment_num} not found in logfile: {logfile}")
+        # List available experiment numbers to help the user
+        available = re.findall(r'EXPERIMENT #(\d+)', content)
+        if available:
+            available_nums = sorted(set(int(n) for n in available))
+            raise ValueError(
+                f"Experiment #{experiment_num} not found in logfile: {logfile}\n"
+                f"Available experiment numbers: {available_nums}"
+            )
+        else:
+            raise ValueError(
+                f"Experiment #{experiment_num} not found in logfile: {logfile}\n"
+                f"No numbered experiments found. The logfile may only contain old format entries."
+            )
 
     entry_content = match.group(1)
 

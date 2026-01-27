@@ -482,33 +482,259 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
             _file_counter += 1
             return _file_counter
 
-    # Mode 2 and Mode 3: run angelic and demonic queries in parallel for each region
-    # Mode 3 additionally ignores threshold and stops when inconclusive fraction < max_inconclusive
-    if refinement_mode in (2, 3):
+    # Mode 3: Epsilon-based parallel angelic/demonic with multi-region concurrency
+    if refinement_mode == 3:
         from collections import deque
 
-        if refinement_mode == 3:
-            if max_inconclusive is None:
-                raise ValueError("'max_inconclusive' is required for refinement_mode 3")
-            total_volume = compute_region_volume(initial_param_bounds)
-            resolved_volume = 0.0
-            refinement_start_time = time.time()
-            # Normalize max_inconclusive to a sorted list (descending) of thresholds
-            if isinstance(max_inconclusive, (list, tuple)):
-                epsilon_thresholds = sorted([float(x) for x in max_inconclusive], reverse=True)
-            else:
-                epsilon_thresholds = [float(max_inconclusive)]
-            # The final stopping target is the smallest threshold
-            final_epsilon = epsilon_thresholds[-1]
-            # Track which thresholds have been snapshotted
-            pending_thresholds = list(epsilon_thresholds)
-            snapshots = []  # List of (epsilon, angelic_copy, demonic_copy, inconclusive_copy, runtime)
-            print("REFINEMENT MODE 3: Epsilon-based parallel angelic/demonic per region")
-            print(f"Epsilon thresholds: {epsilon_thresholds}")
-            if overall_timeout is not None:
-                print(f"Overall timeout: {overall_timeout} seconds")
+        if max_inconclusive is None:
+            raise ValueError("'max_inconclusive' is required for refinement_mode 3")
+        total_volume = compute_region_volume(initial_param_bounds)
+        resolved_volume = 0.0
+        refinement_start_time = time.time()
+        # Normalize max_inconclusive to a sorted list (descending) of thresholds
+        if isinstance(max_inconclusive, (list, tuple)):
+            epsilon_thresholds = sorted([float(x) for x in max_inconclusive], reverse=True)
         else:
-            print("REFINEMENT MODE 2: Running angelic and demonic queries simultaneously per region")
+            epsilon_thresholds = [float(max_inconclusive)]
+        final_epsilon = epsilon_thresholds[-1]
+        pending_thresholds = list(epsilon_thresholds)
+        snapshots = []
+
+        # Determine max concurrent region pairs
+        cpu_count = os.cpu_count() or 2
+        max_concurrent = max(1, cpu_count // 2)
+
+        print("REFINEMENT MODE 3: Epsilon-based parallel angelic/demonic per region")
+        print(f"Epsilon thresholds: {epsilon_thresholds}")
+        print(f"Max concurrent region pairs: {max_concurrent} (using up to {max_concurrent * 2} processes)")
+        if overall_timeout is not None:
+            print(f"Overall timeout: {overall_timeout} seconds")
+        print("A region can be angelic OR demonic winning, but not both.")
+        print(f"{'='*80}\n")
+
+        queue = deque([(initial_param_bounds, 0)])
+        angelic_regions = []
+        demonic_regions = []
+        timed_out_regions = []
+
+        # Active jobs: list of dicts with keys: bounds, depth, angelic_proc, demonic_proc,
+        # angelic_queue, demonic_queue, angelic_done, demonic_done, angelic_result,
+        # demonic_result, start_time, found_sat
+        active_jobs = []
+
+        def _check_epsilon_and_snapshot():
+            """Check epsilon thresholds and take snapshots. Returns True if final epsilon reached."""
+            nonlocal resolved_volume
+            inconclusive_fraction = (total_volume - resolved_volume) / total_volume
+            while pending_thresholds and inconclusive_fraction <= pending_thresholds[0]:
+                crossed = pending_thresholds.pop(0)
+                snap_runtime = time.time() - refinement_start_time
+                snap_inconclusive = list(timed_out_regions) + [{'param_bounds': b, 'depth': d} for b, d in queue]
+                # Also include bounds from active jobs as inconclusive in snapshot
+                for job in active_jobs:
+                    snap_inconclusive.append({'param_bounds': job['bounds'], 'depth': job['depth']})
+                snap_inconclusive_merged = merge_adjacent_regions(snap_inconclusive)
+                snapshots.append((crossed, list(angelic_regions), list(demonic_regions), snap_inconclusive_merged, snap_runtime))
+                print(f"\n*** SNAPSHOT at epsilon={crossed}: inconclusive fraction={inconclusive_fraction:.6f}, runtime={snap_runtime:.2f}s ***")
+            return inconclusive_fraction <= final_epsilon
+
+        def _terminate_all_active():
+            """Terminate all active jobs and mark their regions as timed out."""
+            for job in active_jobs:
+                for proc in [job['angelic_proc'], job['demonic_proc']]:
+                    if proc.is_alive():
+                        proc.terminate()
+                        proc.join(timeout=1)
+                        if proc.is_alive():
+                            proc.kill()
+                timed_out_regions.append({'param_bounds': job['bounds'], 'depth': job['depth']})
+            active_jobs.clear()
+
+        def _launch_job(bounds, depth):
+            """Launch an angelic/demonic pair for the given region."""
+            fid_a = get_unique_file_id()
+            fid_d = get_unique_file_id()
+            aq = multiprocessing.Queue()
+            dq = multiprocessing.Queue()
+            a_args = (bounds, config, entailment_solver, degree, smt_solver, fid_a)
+            d_args = (bounds, config, entailment_solver, degree, smt_solver, fid_d)
+            a_proc = multiprocessing.Process(target=_run_smt_query_worker, args=(a_args, aq))
+            d_proc = multiprocessing.Process(target=_run_dual_smt_query_worker, args=(d_args, dq))
+            indent = "  " * depth
+            print(f"{indent}Exploring region: {bounds} (launching angelic+demonic pair)")
+            a_proc.start()
+            d_proc.start()
+            active_jobs.append({
+                'bounds': bounds, 'depth': depth,
+                'angelic_proc': a_proc, 'demonic_proc': d_proc,
+                'angelic_queue': aq, 'demonic_queue': dq,
+                'angelic_done': False, 'demonic_done': False,
+                'angelic_result': None, 'demonic_result': None,
+                'start_time': time.time(), 'found_sat': False
+            })
+
+        effective_timeout = cutoff_time if cutoff_time is not None else 600
+
+        while queue or active_jobs:
+            # Check overall timeout
+            if overall_timeout is not None and time.time() - refinement_start_time > overall_timeout:
+                print(f"\n⏱ OVERALL TIMEOUT ({overall_timeout}s) reached.")
+                _terminate_all_active()
+                while queue:
+                    rb, rd = queue.popleft()
+                    timed_out_regions.append({'param_bounds': rb, 'depth': rd})
+                snap_runtime = time.time() - refinement_start_time
+                snap_inconclusive_merged = merge_adjacent_regions(timed_out_regions)
+                for crossed in pending_thresholds:
+                    snapshots.append((crossed, list(angelic_regions), list(demonic_regions), list(snap_inconclusive_merged), snap_runtime))
+                    print(f"*** SNAPSHOT at epsilon={crossed} (overall timeout): runtime={snap_runtime:.2f}s ***")
+                pending_thresholds.clear()
+                break
+
+            # Check epsilon criterion
+            if _check_epsilon_and_snapshot():
+                print(f"\n✓ Final epsilon ({final_epsilon}) reached. Stopping.")
+                _terminate_all_active()
+                while queue:
+                    rb, rd = queue.popleft()
+                    timed_out_regions.append({'param_bounds': rb, 'depth': rd})
+                break
+
+            # Fill up to max_concurrent active jobs from the queue
+            while len(active_jobs) < max_concurrent and queue:
+                bounds, depth = queue.popleft()
+                _launch_job(bounds, depth)
+
+            if not active_jobs:
+                break
+
+            # Poll all active jobs
+            completed_indices = []
+            for idx, job in enumerate(active_jobs):
+                indent = "  " * job['depth']
+                elapsed = time.time() - job['start_time']
+
+                # Per-query timeout
+                if elapsed > effective_timeout and not job['found_sat']:
+                    if not job['angelic_done'] or not job['demonic_done']:
+                        print(f"{indent}⏱ TIMEOUT for region {job['bounds']}")
+                        for proc in [job['angelic_proc'], job['demonic_proc']]:
+                            if proc.is_alive():
+                                proc.terminate()
+                        job['angelic_done'] = True
+                        job['demonic_done'] = True
+
+                # Check angelic
+                if not job['angelic_done'] and not job['angelic_proc'].is_alive():
+                    job['angelic_done'] = True
+                    try:
+                        job['angelic_result'] = job['angelic_queue'].get_nowait()
+                    except:
+                        job['angelic_result'] = ('error', 'No result', None)
+
+                    if job['angelic_result'][0] == 'success' and job['angelic_result'][1] == 'sat':
+                        computation_time = time.time() - job['start_time']
+                        print(f"{indent}✓ ANGELIC SAT for {job['bounds']} (time: {computation_time:.2f}s)")
+                        if job['demonic_proc'].is_alive():
+                            job['demonic_proc'].terminate()
+                            job['demonic_proc'].join(timeout=1)
+                            if job['demonic_proc'].is_alive():
+                                job['demonic_proc'].kill()
+                        angelic_regions.append({
+                            'param_bounds': job['bounds'],
+                            'model': job['angelic_result'][2],
+                            'is_sat': 'sat',
+                            'computation_time': computation_time
+                        })
+                        resolved_volume += compute_region_volume(job['bounds'])
+                        job['found_sat'] = True
+                        frac = (total_volume - resolved_volume) / total_volume
+                        print(f"{indent}  [Inconclusive fraction: {frac:.6f}]")
+                        completed_indices.append(idx)
+                        continue
+
+                # Check demonic
+                if not job['demonic_done'] and not job['demonic_proc'].is_alive():
+                    job['demonic_done'] = True
+                    try:
+                        job['demonic_result'] = job['demonic_queue'].get_nowait()
+                    except:
+                        job['demonic_result'] = ('error', 'No result', None)
+
+                    if job['demonic_result'][0] == 'success' and job['demonic_result'][1] == 'sat':
+                        computation_time = time.time() - job['start_time']
+                        print(f"{indent}✓ DEMONIC SAT for {job['bounds']} (time: {computation_time:.2f}s)")
+                        if job['angelic_proc'].is_alive():
+                            job['angelic_proc'].terminate()
+                            job['angelic_proc'].join(timeout=1)
+                            if job['angelic_proc'].is_alive():
+                                job['angelic_proc'].kill()
+                        demonic_regions.append({
+                            'param_bounds': job['bounds'],
+                            'model': job['demonic_result'][2],
+                            'is_sat': 'sat',
+                            'computation_time': computation_time
+                        })
+                        resolved_volume += compute_region_volume(job['bounds'])
+                        job['found_sat'] = True
+                        frac = (total_volume - resolved_volume) / total_volume
+                        print(f"{indent}  [Inconclusive fraction: {frac:.6f}]")
+                        completed_indices.append(idx)
+                        continue
+
+                # Both done, no SAT found
+                if job['angelic_done'] and job['demonic_done'] and not job['found_sat']:
+                    # Clean up
+                    job['angelic_proc'].join(timeout=1)
+                    job['demonic_proc'].join(timeout=1)
+
+                    # Split region (mode 3 never stops due to threshold)
+                    max_dim = max(range(len(job['bounds'])),
+                                 key=lambda d: job['bounds'][d][1] - job['bounds'][d][0])
+                    left_bounds, right_bounds = split_bounds(job['bounds'], max_dim)
+                    print(f"{indent}✗ Both UNSAT/timeout - splitting region {job['bounds']}...")
+                    queue.append((left_bounds, job['depth'] + 1))
+                    queue.append((right_bounds, job['depth'] + 1))
+                    frac = (total_volume - resolved_volume) / total_volume
+                    print(f"{indent}  [Inconclusive fraction: {frac:.6f}]")
+                    completed_indices.append(idx)
+
+            # Remove completed jobs (reverse order to preserve indices)
+            for idx in sorted(completed_indices, reverse=True):
+                job = active_jobs.pop(idx)
+                job['angelic_proc'].join(timeout=1)
+                job['demonic_proc'].join(timeout=1)
+
+            if not completed_indices:
+                time.sleep(0.1)  # Avoid busy waiting if nothing completed this cycle
+
+        # Summary
+        print(f"\n{'='*80}")
+        print(f"PARALLEL REFINEMENT COMPLETE (MODE 3)")
+        print(f"{'='*80}")
+        print(f"Total angelic winning regions found: {len(angelic_regions)}")
+        for i, model_info in enumerate(angelic_regions, 1):
+            print(f"  Region {i}: {model_info['param_bounds']}")
+        print(f"\nTotal demonic winning regions found: {len(demonic_regions)}")
+        for i, model_info in enumerate(demonic_regions, 1):
+            print(f"  Region {i}: {model_info['param_bounds']}")
+        if timed_out_regions:
+            print(f"\nInconclusive regions: {len(timed_out_regions)}")
+            for i, region_info in enumerate(timed_out_regions, 1):
+                print(f"  Region {i}: {region_info['param_bounds']}")
+        print(f"{'='*80}\n")
+
+        merged_inconclusive = merge_adjacent_regions(timed_out_regions)
+        if len(timed_out_regions) != len(merged_inconclusive):
+            print(f"Merged {len(timed_out_regions)} inconclusive regions into {len(merged_inconclusive)} regions.")
+
+        return angelic_regions, demonic_regions, merged_inconclusive, snapshots
+
+    # Mode 2: run angelic and demonic queries in parallel for each region (one at a time)
+    if refinement_mode == 2:
+        from collections import deque
+
+        print("REFINEMENT MODE 2: Running angelic and demonic queries simultaneously per region")
         print("A region can be angelic OR demonic winning, but not both.")
         print(f"{'='*80}\n")
 
@@ -518,49 +744,14 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         timed_out_regions = []
 
         while queue:
-            # Mode 3: check overall timeout
-            if refinement_mode == 3 and overall_timeout is not None:
-                if time.time() - refinement_start_time > overall_timeout:
-                    print(f"\n⏱ OVERALL TIMEOUT ({overall_timeout}s) reached. Marking remaining regions as inconclusive.")
-                    while queue:
-                        remaining_bounds, remaining_depth = queue.popleft()
-                        timed_out_regions.append({'param_bounds': remaining_bounds, 'depth': remaining_depth})
-                    # Take snapshots for any remaining pending thresholds
-                    snap_runtime = time.time() - refinement_start_time
-                    snap_inconclusive_merged = merge_adjacent_regions(timed_out_regions)
-                    for crossed in pending_thresholds:
-                        snapshots.append((crossed, list(angelic_regions), list(demonic_regions), list(snap_inconclusive_merged), snap_runtime))
-                        print(f"*** SNAPSHOT at epsilon={crossed} (overall timeout): runtime={snap_runtime:.2f}s ***")
-                    pending_thresholds.clear()
-                    break
-
-            # Mode 3: check epsilon criterion and take snapshots
-            if refinement_mode == 3:
-                inconclusive_fraction = (total_volume - resolved_volume) / total_volume
-                # Check if we've crossed any pending thresholds (descending order)
-                while pending_thresholds and inconclusive_fraction <= pending_thresholds[0]:
-                    crossed = pending_thresholds.pop(0)
-                    snap_runtime = time.time() - refinement_start_time
-                    # Build inconclusive snapshot: current timed_out + remaining queue
-                    snap_inconclusive = list(timed_out_regions) + [{'param_bounds': b, 'depth': d} for b, d in queue]
-                    snap_inconclusive_merged = merge_adjacent_regions(snap_inconclusive)
-                    snapshots.append((crossed, list(angelic_regions), list(demonic_regions), snap_inconclusive_merged, snap_runtime))
-                    print(f"\n*** SNAPSHOT at epsilon={crossed}: inconclusive fraction={inconclusive_fraction:.6f}, runtime={snap_runtime:.2f}s ***")
-                if inconclusive_fraction <= final_epsilon:
-                    print(f"\n✓ Inconclusive fraction ({inconclusive_fraction:.6f}) <= final epsilon ({final_epsilon}). Stopping.")
-                    while queue:
-                        remaining_bounds, remaining_depth = queue.popleft()
-                        timed_out_regions.append({'param_bounds': remaining_bounds, 'depth': remaining_depth})
-                    break
-
             current_bounds, depth = queue.popleft()
             indent = "  " * depth
             width = compute_width(current_bounds)
 
             print(f"{indent}Exploring region: {current_bounds} (width: {width:.6f})")
 
-            # Early threshold check (mode 3 ignores threshold)
-            if refinement_mode != 3 and width <= threshold:
+            # Early threshold check
+            if width <= threshold:
                 print(f"{indent}✗ Below threshold - marking as inconclusive")
                 timed_out_regions.append({'param_bounds': current_bounds, 'depth': depth})
                 continue
@@ -593,15 +784,14 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
             demonic_result = None
             angelic_done = False
             demonic_done = False
-            found_sat = False  # Track if we found a SAT result (no need to split)
+            found_sat = False
 
-            effective_timeout = cutoff_time if cutoff_time is not None else 600  # 10 min default
+            effective_timeout = cutoff_time if cutoff_time is not None else 600
 
             start_time = time.time()
             while not (angelic_done and demonic_done):
                 elapsed = time.time() - start_time
                 if elapsed > effective_timeout:
-                    # Timeout - terminate both
                     print(f"{indent}⏱ TIMEOUT")
                     if angelic_process.is_alive():
                         angelic_process.terminate()
@@ -618,7 +808,6 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                         angelic_result = ('error', 'No result', None)
 
                     if angelic_result[0] == 'success' and angelic_result[1] == 'sat':
-                        # Angelic SAT - terminate demonic and record
                         computation_time = time.time() - start_time
                         print(f"{indent}✓ ANGELIC SAT - terminating demonic query (time: {computation_time:.2f}s)")
                         if demonic_process.is_alive():
@@ -632,8 +821,6 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                             'is_sat': 'sat',
                             'computation_time': computation_time
                         })
-                        if refinement_mode == 3:
-                            resolved_volume += compute_region_volume(current_bounds)
                         found_sat = True
                         break
 
@@ -646,7 +833,6 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                         demonic_result = ('error', 'No result', None)
 
                     if demonic_result[0] == 'success' and demonic_result[1] == 'sat':
-                        # Demonic SAT - terminate angelic and record
                         computation_time = time.time() - start_time
                         print(f"{indent}✓ DEMONIC SAT - terminating angelic query (time: {computation_time:.2f}s)")
                         if angelic_process.is_alive():
@@ -660,22 +846,16 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                             'is_sat': 'sat',
                             'computation_time': computation_time
                         })
-                        if refinement_mode == 3:
-                            resolved_volume += compute_region_volume(current_bounds)
                         found_sat = True
                         break
 
-                time.sleep(0.1)  # Small delay to avoid busy waiting
+                time.sleep(0.1)
 
             # Clean up processes
             angelic_process.join(timeout=1)
             demonic_process.join(timeout=1)
 
-            # Skip splitting if we already found a SAT result for this region
             if found_sat:
-                if refinement_mode == 3:
-                    frac = (total_volume - resolved_volume) / total_volume
-                    print(f"{indent}  [Inconclusive fraction: {frac:.6f}]")
                 continue
 
             # Check final state if both completed without SAT
@@ -684,41 +864,33 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 demonic_sat = demonic_result and demonic_result[0] == 'success' and demonic_result[1] == 'sat'
 
                 if not angelic_sat and not demonic_sat:
-                    # Both UNSAT - need to split
                     max_dim = max(range(len(current_bounds)),
                                  key=lambda d: current_bounds[d][1] - current_bounds[d][0])
                     left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
                     child_width = compute_width(left_bounds)
 
-                    if refinement_mode != 3 and child_width <= threshold:
+                    if child_width <= threshold:
                         print(f"{indent}✗ Both UNSAT - children would be below threshold, marking as inconclusive")
                         timed_out_regions.append({'param_bounds': current_bounds, 'depth': depth})
                     else:
                         print(f"{indent}✗ Both UNSAT - splitting region...")
                         queue.append((left_bounds, depth + 1))
                         queue.append((right_bounds, depth + 1))
-                    if refinement_mode == 3:
-                        frac = (total_volume - resolved_volume) / total_volume
-                        print(f"{indent}  [Inconclusive fraction: {frac:.6f}]")
             elif not angelic_done or not demonic_done:
-                # Timeout occurred before both completed
                 max_dim = max(range(len(current_bounds)),
                              key=lambda d: current_bounds[d][1] - current_bounds[d][0])
                 left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
                 child_width = compute_width(left_bounds)
 
-                if refinement_mode != 3 and child_width <= threshold:
+                if child_width <= threshold:
                     print(f"{indent}⏱ Timeout at minimum granularity - marking as inconclusive")
                     timed_out_regions.append({'param_bounds': current_bounds, 'depth': depth})
                 else:
                     print(f"{indent}⏱ Timeout - splitting to continue exploration...")
                     queue.append((left_bounds, depth + 1))
                     queue.append((right_bounds, depth + 1))
-                if refinement_mode == 3:
-                    frac = (total_volume - resolved_volume) / total_volume
-                    print(f"{indent}  [Inconclusive fraction: {frac:.6f}]")
 
-        # Skip the separate angelic/demonic phases - we've done both simultaneously
+        # Summary
         print(f"\n{'='*80}")
         print(f"PARALLEL REFINEMENT COMPLETE")
         print(f"{'='*80}")
@@ -734,13 +906,9 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 print(f"  Region {i}: {region_info['param_bounds']}")
         print(f"{'='*80}\n")
 
-        # Merge adjacent inconclusive regions
         merged_inconclusive = merge_adjacent_regions(timed_out_regions)
         if len(timed_out_regions) != len(merged_inconclusive):
             print(f"Merged {len(timed_out_regions)} inconclusive regions into {len(merged_inconclusive)} regions.")
-
-        if refinement_mode == 3:
-            return angelic_regions, demonic_regions, merged_inconclusive, snapshots
 
         return angelic_regions, demonic_regions, merged_inconclusive
 

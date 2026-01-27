@@ -235,7 +235,8 @@ def merge_adjacent_regions(regions: List[Dict]) -> List[Dict]:
 
 def write_to_logfile(logfile: str, config_file: str, angelic_regions: List[Dict],
                      demonic_regions: List[Dict], inconclusive_regions: List[Dict],
-                     runtime: float, refinement_mode: Optional[int] = None) -> None:
+                     runtime: float, refinement_mode: Optional[int] = None,
+                     epsilon: Optional[float] = None) -> None:
     """Write experimental results to a logfile.
 
     Appends the results to the logfile, creating it if it doesn't exist.
@@ -274,6 +275,8 @@ def write_to_logfile(logfile: str, config_file: str, angelic_regions: List[Dict]
         f.write(f"Date/Time: {timestamp}\n")
         f.write(f"Input file: {config_file}\n")
         f.write(f"Refinement mode: {mode_descriptions.get(refinement_mode, f'Unknown ({refinement_mode})')}\n")
+        if epsilon is not None:
+            f.write(f"Epsilon (max_inconclusive): {epsilon}\n")
         f.write(f"Total runtime: {runtime:.2f} seconds\n")
         f.write(f"\n")
 
@@ -394,7 +397,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                           degree: int, smt_solver: str, threshold: float = 0.01,
                           refinement_mode: int = 0,
                           cutoff_time: Optional[float] = None,
-                          max_inconclusive: Optional[float] = None,
+                          max_inconclusive=None,
                           overall_timeout: Optional[float] = None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """Iteratively refine parameter space to find angelic and demonic winning regions.
 
@@ -414,6 +417,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
             3 - Epsilon-based: like mode 2 but ignores threshold, stops when inconclusive fraction < max_inconclusive
         cutoff_time: Optional timeout in seconds for each SMT query. If None, no timeout.
         max_inconclusive: Maximum fraction of parameter space that can remain inconclusive (required for mode 3).
+            Can be a single float or a list of floats. If a list, snapshots are taken at each threshold.
         overall_timeout: Optional overall timeout in seconds for the entire refinement (mode 3).
 
     Returns:
@@ -489,8 +493,18 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
             total_volume = compute_region_volume(initial_param_bounds)
             resolved_volume = 0.0
             refinement_start_time = time.time()
+            # Normalize max_inconclusive to a sorted list (descending) of thresholds
+            if isinstance(max_inconclusive, (list, tuple)):
+                epsilon_thresholds = sorted([float(x) for x in max_inconclusive], reverse=True)
+            else:
+                epsilon_thresholds = [float(max_inconclusive)]
+            # The final stopping target is the smallest threshold
+            final_epsilon = epsilon_thresholds[-1]
+            # Track which thresholds have been snapshotted
+            pending_thresholds = list(epsilon_thresholds)
+            snapshots = []  # List of (epsilon, angelic_copy, demonic_copy, inconclusive_copy, runtime)
             print("REFINEMENT MODE 3: Epsilon-based parallel angelic/demonic per region")
-            print(f"Max inconclusive fraction: {max_inconclusive}")
+            print(f"Epsilon thresholds: {epsilon_thresholds}")
             if overall_timeout is not None:
                 print(f"Overall timeout: {overall_timeout} seconds")
         else:
@@ -511,13 +525,29 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                     while queue:
                         remaining_bounds, remaining_depth = queue.popleft()
                         timed_out_regions.append({'param_bounds': remaining_bounds, 'depth': remaining_depth})
+                    # Take snapshots for any remaining pending thresholds
+                    snap_runtime = time.time() - refinement_start_time
+                    snap_inconclusive_merged = merge_adjacent_regions(timed_out_regions)
+                    for crossed in pending_thresholds:
+                        snapshots.append((crossed, list(angelic_regions), list(demonic_regions), list(snap_inconclusive_merged), snap_runtime))
+                        print(f"*** SNAPSHOT at epsilon={crossed} (overall timeout): runtime={snap_runtime:.2f}s ***")
+                    pending_thresholds.clear()
                     break
 
-            # Mode 3: check epsilon criterion
+            # Mode 3: check epsilon criterion and take snapshots
             if refinement_mode == 3:
                 inconclusive_fraction = (total_volume - resolved_volume) / total_volume
-                if inconclusive_fraction <= max_inconclusive:
-                    print(f"\n✓ Inconclusive fraction ({inconclusive_fraction:.6f}) <= max_inconclusive ({max_inconclusive}). Stopping.")
+                # Check if we've crossed any pending thresholds (descending order)
+                while pending_thresholds and inconclusive_fraction <= pending_thresholds[0]:
+                    crossed = pending_thresholds.pop(0)
+                    snap_runtime = time.time() - refinement_start_time
+                    # Build inconclusive snapshot: current timed_out + remaining queue
+                    snap_inconclusive = list(timed_out_regions) + [{'param_bounds': b, 'depth': d} for b, d in queue]
+                    snap_inconclusive_merged = merge_adjacent_regions(snap_inconclusive)
+                    snapshots.append((crossed, list(angelic_regions), list(demonic_regions), snap_inconclusive_merged, snap_runtime))
+                    print(f"\n*** SNAPSHOT at epsilon={crossed}: inconclusive fraction={inconclusive_fraction:.6f}, runtime={snap_runtime:.2f}s ***")
+                if inconclusive_fraction <= final_epsilon:
+                    print(f"\n✓ Inconclusive fraction ({inconclusive_fraction:.6f}) <= final epsilon ({final_epsilon}). Stopping.")
                     while queue:
                         remaining_bounds, remaining_depth = queue.popleft()
                         timed_out_regions.append({'param_bounds': remaining_bounds, 'depth': remaining_depth})
@@ -643,6 +673,9 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
 
             # Skip splitting if we already found a SAT result for this region
             if found_sat:
+                if refinement_mode == 3:
+                    frac = (total_volume - resolved_volume) / total_volume
+                    print(f"{indent}  [Inconclusive fraction: {frac:.6f}]")
                 continue
 
             # Check final state if both completed without SAT
@@ -664,6 +697,9 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                         print(f"{indent}✗ Both UNSAT - splitting region...")
                         queue.append((left_bounds, depth + 1))
                         queue.append((right_bounds, depth + 1))
+                    if refinement_mode == 3:
+                        frac = (total_volume - resolved_volume) / total_volume
+                        print(f"{indent}  [Inconclusive fraction: {frac:.6f}]")
             elif not angelic_done or not demonic_done:
                 # Timeout occurred before both completed
                 max_dim = max(range(len(current_bounds)),
@@ -678,6 +714,9 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                     print(f"{indent}⏱ Timeout - splitting to continue exploration...")
                     queue.append((left_bounds, depth + 1))
                     queue.append((right_bounds, depth + 1))
+                if refinement_mode == 3:
+                    frac = (total_volume - resolved_volume) / total_volume
+                    print(f"{indent}  [Inconclusive fraction: {frac:.6f}]")
 
         # Skip the separate angelic/demonic phases - we've done both simultaneously
         print(f"\n{'='*80}")
@@ -699,6 +738,9 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         merged_inconclusive = merge_adjacent_regions(timed_out_regions)
         if len(timed_out_regions) != len(merged_inconclusive):
             print(f"Merged {len(timed_out_regions)} inconclusive regions into {len(merged_inconclusive)} regions.")
+
+        if refinement_mode == 3:
+            return angelic_regions, demonic_regions, merged_inconclusive, snapshots
 
         return angelic_regions, demonic_regions, merged_inconclusive
 
@@ -1167,11 +1209,16 @@ def main():
         max_inconclusive = None
         overall_timeout = None
         if refinement_mode == 3:
-            max_inconclusive = config.get('max_inconclusive', None)
-            if max_inconclusive is None:
+            max_inconclusive_raw = config.get('max_inconclusive', None)
+            if max_inconclusive_raw is None:
                 raise ValueError("'max_inconclusive' is required when refinement_mode is 3")
-            max_inconclusive = float(max_inconclusive)
-            print(f"Max inconclusive fraction: {max_inconclusive}")
+            # Support both scalar and vector
+            if isinstance(max_inconclusive_raw, (list, tuple)):
+                max_inconclusive = [float(x) for x in max_inconclusive_raw]
+                print(f"Max inconclusive fractions: {max_inconclusive}")
+            else:
+                max_inconclusive = float(max_inconclusive_raw)
+                print(f"Max inconclusive fraction: {max_inconclusive}")
             overall_timeout_raw = config.get('overall_timeout', None)
             if overall_timeout_raw is not None:
                 overall_timeout = float(overall_timeout_raw)
@@ -1179,10 +1226,16 @@ def main():
 
         start_time = time.time()
 
-        angelic_regions, demonic_regions, timed_out_regions = refine_parameter_space(
+        result = refine_parameter_space(
             config, entailment_solver, degree, smt_solver, threshold, refinement_mode, cutoff_time,
             max_inconclusive=max_inconclusive, overall_timeout=overall_timeout
         )
+
+        if refinement_mode == 3:
+            angelic_regions, demonic_regions, timed_out_regions, snapshots = result
+        else:
+            angelic_regions, demonic_regions, timed_out_regions = result
+            snapshots = None
 
         runtime = time.time() - start_time
 
@@ -1221,8 +1274,15 @@ def main():
         # Write to logfile if specified
         logfile = config.get('logfile')
         if logfile:
-            write_to_logfile(logfile, config_file, angelic_regions, demonic_regions,
-                           timed_out_regions, runtime, refinement_mode)
+            if refinement_mode == 3 and snapshots:
+                # Write each snapshot as a separate experiment entry
+                for epsilon, snap_angelic, snap_demonic, snap_inconclusive, snap_runtime in snapshots:
+                    write_to_logfile(logfile, config_file, snap_angelic, snap_demonic,
+                                   snap_inconclusive, snap_runtime, refinement_mode,
+                                   epsilon=epsilon)
+            else:
+                write_to_logfile(logfile, config_file, angelic_regions, demonic_regions,
+                               timed_out_regions, runtime, refinement_mode)
 
         return angelic_regions, demonic_regions, timed_out_regions
 

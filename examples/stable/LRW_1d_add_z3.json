@@ -53,9 +53,9 @@
         ]
     },
     "param_refinement_threshold": 0.1,
-    "max_inconclusive": [0.5, 0.4, 0.3, 0.2, 0.15, 0.1, 0.05, 0.025],
-    "overall_timeout": 900,
-    "cutoff_time_per_smt_query": 15,
+    "max_inconclusive": [0.5, 0.4, 0.3, 0.2, 0.15, 0.125],
+    "overall_timeout": 600,
+    "cutoff_time_per_smt_query": 10,
     "target_probability": 0.9,
     "degree": 1,
     "smt_solver": "z3",

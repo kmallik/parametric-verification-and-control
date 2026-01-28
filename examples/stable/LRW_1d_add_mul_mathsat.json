@@ -2,14 +2,14 @@
     "system": {
         "type": "cartesian",
         "state_vars": ["S1"],
-        "param_vars": ["P1"],
+        "param_vars": ["P1","P2"],
         "noise_vars": ["W1"],
         "control_vars": ["U1"],
         "state_bounds": [
             [-2, 150]
         ],
         "param_bounds": [
-            [-1.0, 1.0]
+            [-1.0, 1.0], [-1.0, 1.0]
         ],
         "control_bounds": [
             [0, 0.6]
@@ -29,7 +29,7 @@
             {
                 "condition": "0 <= S1 <= 100",
                 "transforms": {
-                    "S1": "(+ S1 (+ U1 (* W1 P1)))"
+                    "S1": "(+ (+ S1 P2) (+ U1 (* W1 P1)))"
                 }
             },
             {
@@ -42,8 +42,8 @@
         "noise_distribution": {
             "type": "uniform",
             "params": {
-                "lower": [-2.0],
-                "upper": [-1.0]
+                "lower": [-0.75],
+                "upper": [-0.25]
             }
         }
     },
@@ -53,12 +53,14 @@
         ]
     },
     "param_refinement_threshold": 0.1,
-    "cutoff_time_per_smt_query": 10,
+    "max_inconclusive": [0.4,0.3, 0.2, 0.15],
+    "overall_timeout": 21600,
+    "cutoff_time_per_smt_query": 20,
     "target_probability": 0.9,
     "degree": 1,
     "smt_solver": "mathsat",
     "entailment_solver": "farkas",
     "output_smt_path": "./tmp/temporary_polyhorn_input.smt2",
-    "refinement_mode": 2,
-    "logfile": "./results.log"
+    "refinement_mode": 3,
+    "logfile": "./results_add_mul_mathsat.log"
 }

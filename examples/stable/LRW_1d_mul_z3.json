@@ -29,7 +29,7 @@
             {
                 "condition": "0 <= S1 <= 100",
                 "transforms": {
-                    "S1": "(+ S1 (+ U1 (+ W1 P1)))"
+                    "S1": "(+ S1 (+ U1 (* W1 P1)))"
                 }
             },
             {
@@ -42,8 +42,8 @@
         "noise_distribution": {
             "type": "uniform",
             "params": {
-                "lower": [-0.75],
-                "upper": [-0.25]
+                "lower": [-2.0],
+                "upper": [-1.0]
             }
         }
     },
@@ -53,14 +53,14 @@
         ]
     },
     "param_refinement_threshold": 0.1,
-    "max_inconclusive": 0.5,
-    "overall_timeout": 600,
-    "cutoff_time_per_smt_query": 10,
+    "max_inconclusive": [0.5, 0.4, 0.3, 0.2, 0.1, 0.05, 0.025],
+    "overall_timeout": 3600,
+    "cutoff_time_per_smt_query": 15,
     "target_probability": 0.9,
     "degree": 1,
-    "smt_solver": "mathsat",
+    "smt_solver": "z3",
     "entailment_solver": "farkas",
     "output_smt_path": "./tmp/temporary_polyhorn_input.smt2",
     "refinement_mode": 3,
-    "logfile": "./results.log"
+    "logfile": "./results_mul_z3.log"
 }

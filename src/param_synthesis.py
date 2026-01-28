@@ -398,7 +398,9 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                           refinement_mode: int = 0,
                           cutoff_time: Optional[float] = None,
                           max_inconclusive=None,
-                          overall_timeout: Optional[float] = None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                          overall_timeout: Optional[float] = None,
+                          logfile: Optional[str] = None,
+                          config_file: Optional[str] = None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """Iteratively refine parameter space to find angelic and demonic winning regions.
 
     First finds angelic winning regions (exists controller satisfying spec).
@@ -498,7 +500,6 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
             epsilon_thresholds = [float(max_inconclusive)]
         final_epsilon = epsilon_thresholds[-1]
         pending_thresholds = list(epsilon_thresholds)
-        snapshots = []
 
         # Determine max concurrent region pairs
         cpu_count = os.cpu_count() or 2
@@ -534,8 +535,10 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 for job in active_jobs:
                     snap_inconclusive.append({'param_bounds': job['bounds'], 'depth': job['depth']})
                 snap_inconclusive_merged = merge_adjacent_regions(snap_inconclusive)
-                snapshots.append((crossed, list(angelic_regions), list(demonic_regions), snap_inconclusive_merged, snap_runtime))
                 print(f"\n*** SNAPSHOT at epsilon={crossed}: inconclusive fraction={inconclusive_fraction:.6f}, runtime={snap_runtime:.2f}s ***")
+                if logfile and config_file:
+                    write_to_logfile(logfile, config_file, list(angelic_regions), list(demonic_regions),
+                                   snap_inconclusive_merged, snap_runtime, refinement_mode, epsilon=crossed)
             return inconclusive_fraction <= final_epsilon
 
         def _terminate_all_active():
@@ -586,8 +589,10 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 snap_runtime = time.time() - refinement_start_time
                 snap_inconclusive_merged = merge_adjacent_regions(timed_out_regions)
                 for crossed in pending_thresholds:
-                    snapshots.append((crossed, list(angelic_regions), list(demonic_regions), list(snap_inconclusive_merged), snap_runtime))
                     print(f"*** SNAPSHOT at epsilon={crossed} (overall timeout): runtime={snap_runtime:.2f}s ***")
+                    if logfile and config_file:
+                        write_to_logfile(logfile, config_file, list(angelic_regions), list(demonic_regions),
+                                       list(snap_inconclusive_merged), snap_runtime, refinement_mode, epsilon=crossed)
                 pending_thresholds.clear()
                 break
 
@@ -728,7 +733,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         if len(timed_out_regions) != len(merged_inconclusive):
             print(f"Merged {len(timed_out_regions)} inconclusive regions into {len(merged_inconclusive)} regions.")
 
-        return angelic_regions, demonic_regions, merged_inconclusive, snapshots
+        return angelic_regions, demonic_regions, merged_inconclusive
 
     # Mode 2: run angelic and demonic queries in parallel for each region (one at a time)
     if refinement_mode == 2:
@@ -1394,16 +1399,13 @@ def main():
 
         start_time = time.time()
 
-        result = refine_parameter_space(
-            config, entailment_solver, degree, smt_solver, threshold, refinement_mode, cutoff_time,
-            max_inconclusive=max_inconclusive, overall_timeout=overall_timeout
-        )
+        logfile = config.get('logfile')
 
-        if refinement_mode == 3:
-            angelic_regions, demonic_regions, timed_out_regions, snapshots = result
-        else:
-            angelic_regions, demonic_regions, timed_out_regions = result
-            snapshots = None
+        angelic_regions, demonic_regions, timed_out_regions = refine_parameter_space(
+            config, entailment_solver, degree, smt_solver, threshold, refinement_mode, cutoff_time,
+            max_inconclusive=max_inconclusive, overall_timeout=overall_timeout,
+            logfile=logfile, config_file=config_file
+        )
 
         runtime = time.time() - start_time
 
@@ -1439,18 +1441,10 @@ def main():
 
         print(f"\n{'='*80}\n")
 
-        # Write to logfile if specified
-        logfile = config.get('logfile')
-        if logfile:
-            if refinement_mode == 3 and snapshots:
-                # Write each snapshot as a separate experiment entry
-                for epsilon, snap_angelic, snap_demonic, snap_inconclusive, snap_runtime in snapshots:
-                    write_to_logfile(logfile, config_file, snap_angelic, snap_demonic,
-                                   snap_inconclusive, snap_runtime, refinement_mode,
-                                   epsilon=epsilon)
-            else:
-                write_to_logfile(logfile, config_file, angelic_regions, demonic_regions,
-                               timed_out_regions, runtime, refinement_mode)
+        # Write to logfile if specified (mode 3 already writes snapshots incrementally)
+        if logfile and refinement_mode != 3:
+            write_to_logfile(logfile, config_file, angelic_regions, demonic_regions,
+                           timed_out_regions, runtime, refinement_mode)
 
         return angelic_regions, demonic_regions, timed_out_regions
 

@@ -4,6 +4,8 @@ import os
 import time
 import threading
 import multiprocessing
+import random
+import math
 from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -400,7 +402,8 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                           max_inconclusive=None,
                           overall_timeout: Optional[float] = None,
                           logfile: Optional[str] = None,
-                          config_file: Optional[str] = None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                          config_file: Optional[str] = None,
+                          exploration_rate: float = 0.3) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """Iteratively refine parameter space to find angelic and demonic winning regions.
 
     First finds angelic winning regions (exists controller satisfying spec).
@@ -486,8 +489,6 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
 
     # Mode 3: Epsilon-based parallel angelic/demonic with multi-region concurrency
     if refinement_mode == 3:
-        from collections import deque
-
         if max_inconclusive is None:
             raise ValueError("'max_inconclusive' is required for refinement_mode 3")
         total_volume = compute_region_volume(initial_param_bounds)
@@ -513,14 +514,42 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         print("A region can be angelic OR demonic winning, but not both.")
         print(f"{'='*80}\n")
 
-        queue = deque([(initial_param_bounds, 0)])
+        queue = [(initial_param_bounds, 0)]  # list for indexed access (exploration/exploitation)
         angelic_regions = []
         demonic_regions = []
         timed_out_regions = []
+        sat_centers = []  # Centers of all SAT regions found so far
 
-        # Active jobs: list of dicts with keys: bounds, depth, angelic_proc, demonic_proc,
-        # angelic_queue, demonic_queue, angelic_done, demonic_done, angelic_result,
-        # demonic_result, start_time, found_sat
+        def _region_center(bounds):
+            """Compute the center point of a rectangular region."""
+            return tuple((lo + hi) / 2.0 for lo, hi in bounds)
+
+        def _distance(c1, c2):
+            """Euclidean distance between two center points."""
+            return math.sqrt(sum((a - b) ** 2 for a, b in zip(c1, c2)))
+
+        def _min_distance_to_sat(bounds):
+            """Minimum distance from a region's center to the nearest SAT center."""
+            center = _region_center(bounds)
+            return min(_distance(center, sc) for sc in sat_centers)
+
+        def _select_from_queue():
+            """Select a region from the queue using exploration/exploitation.
+            Exploitation: pick the region closest to any known SAT center.
+            Exploration: pick a random region.
+            Returns (bounds, depth) and removes it from the queue."""
+            if not queue:
+                return None
+            if not sat_centers or random.random() < exploration_rate:
+                # Exploration (or no SAT found yet): pick random
+                idx = random.randrange(len(queue))
+            else:
+                # Exploitation: pick closest to any SAT center
+                idx = min(range(len(queue)),
+                         key=lambda i: _min_distance_to_sat(queue[i][0]))
+            return queue.pop(idx)
+
+        # Active jobs: list of dicts
         active_jobs = []
 
         def _check_epsilon_and_snapshot():
@@ -584,7 +613,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 print(f"\n⏱ OVERALL TIMEOUT ({overall_timeout}s) reached.")
                 _terminate_all_active()
                 while queue:
-                    rb, rd = queue.popleft()
+                    rb, rd = queue.pop(0)
                     timed_out_regions.append({'param_bounds': rb, 'depth': rd})
                 snap_runtime = time.time() - refinement_start_time
                 snap_inconclusive_merged = merge_adjacent_regions(timed_out_regions)
@@ -601,13 +630,16 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 print(f"\n✓ Final epsilon ({final_epsilon}) reached. Stopping.")
                 _terminate_all_active()
                 while queue:
-                    rb, rd = queue.popleft()
+                    rb, rd = queue.pop(0)
                     timed_out_regions.append({'param_bounds': rb, 'depth': rd})
                 break
 
             # Fill up to max_concurrent active jobs from the queue
             while len(active_jobs) < max_concurrent and queue:
-                bounds, depth = queue.popleft()
+                selected = _select_from_queue()
+                if selected is None:
+                    break
+                bounds, depth = selected
                 _launch_job(bounds, depth)
 
             if not active_jobs:
@@ -652,6 +684,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                             'computation_time': computation_time
                         })
                         resolved_volume += compute_region_volume(job['bounds'])
+                        sat_centers.append(_region_center(job['bounds']))
                         job['found_sat'] = True
                         frac = (total_volume - resolved_volume) / total_volume
                         print(f"{indent}  [Inconclusive fraction: {frac:.6f}]")
@@ -681,6 +714,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                             'computation_time': computation_time
                         })
                         resolved_volume += compute_region_volume(job['bounds'])
+                        sat_centers.append(_region_center(job['bounds']))
                         job['found_sat'] = True
                         frac = (total_volume - resolved_volume) / total_volume
                         print(f"{indent}  [Inconclusive fraction: {frac:.6f}]")
@@ -1397,6 +1431,10 @@ def main():
                 overall_timeout = float(overall_timeout_raw)
                 print(f"Overall timeout: {overall_timeout} seconds")
 
+        exploration_rate = float(config.get('exploration_rate', 0.3))
+        if refinement_mode == 3:
+            print(f"Exploration rate: {exploration_rate}")
+
         start_time = time.time()
 
         logfile = config.get('logfile')
@@ -1404,7 +1442,7 @@ def main():
         angelic_regions, demonic_regions, timed_out_regions = refine_parameter_space(
             config, entailment_solver, degree, smt_solver, threshold, refinement_mode, cutoff_time,
             max_inconclusive=max_inconclusive, overall_timeout=overall_timeout,
-            logfile=logfile, config_file=config_file
+            logfile=logfile, config_file=config_file, exploration_rate=exploration_rate
         )
 
         runtime = time.time() - start_time

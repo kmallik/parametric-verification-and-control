@@ -62,5 +62,5 @@
     "entailment_solver": "farkas",
     "output_smt_path": "./tmp/temporary_polyhorn_input.smt2",
     "refinement_mode": 3,
-    "logfile": "./results_add_mul_mathsat.log"
+    "logfile": "./final_results/results_add_mul_mathsat.log"
 }

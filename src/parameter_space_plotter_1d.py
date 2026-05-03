@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Parameter Space Plotter
+1D Parameter Space Plotter
 
 Plots the results of parameter synthesis experiments from the logfile.
 Visualizes angelic winning regions (green) and demonic winning regions (red)
-on a 2D parameter space.
+on a 1D parameter space represented as a horizontal rectangle.
 
 Usage:
-    python parameter_space_plotter.py <config.json> <experiment_number> [x_label] [y_label]
+    python parameter_space_plotter_1d.py <config.json> <experiment_number> [x_label]
 """
 
 import json
@@ -157,34 +157,35 @@ def validate_region_bounds(region_bounds: List, param_bounds: List, region_type:
             )
 
 
-def plot_parameter_space(config: Dict[str, Any], log_entry: Dict[str, Any],
-                         experiment_num: int, output_path: str,
-                         x_label: str = None, y_label: str = None) -> None:
-    """Create and save the parameter space plot."""
+def plot_parameter_space_1d(config: Dict[str, Any], log_entry: Dict[str, Any],
+                            experiment_num: int, output_path: str, x_label: str = None) -> None:
+    """Create and save the 1D parameter space plot as a thin horizontal rectangle."""
     param_bounds = config['system']['param_bounds']
     param_vars = config['system']['param_vars']
 
     # Create figure and axis
-    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+    fig, ax = plt.subplots(1, 1, figsize=(12, 2))
 
     # Set axis limits based on parameter bounds
     x_bounds = param_bounds[0]
-    y_bounds = param_bounds[1]
+
+    # Rectangle height and y-position (centered at y=0.5)
+    rect_height = 0.5
+    rect_y = 0.25
 
     ax.set_xlim(x_bounds[0], x_bounds[1])
-    ax.set_ylim(y_bounds[0], y_bounds[1])
+    ax.set_ylim(0, 1)
 
     # Plot angelic regions (green)
     for region in log_entry['angelic_regions']:
         validate_region_bounds(region, param_bounds, "Angelic")
 
         x_lo, x_hi = region[0]
-        y_lo, y_hi = region[1]
 
         rect = patches.Rectangle(
-            (x_lo, y_lo),
+            (x_lo, rect_y),
             x_hi - x_lo,
-            y_hi - y_lo,
+            rect_height,
             linewidth=1,
             edgecolor='darkgreen',
             facecolor='green',
@@ -198,12 +199,11 @@ def plot_parameter_space(config: Dict[str, Any], log_entry: Dict[str, Any],
         validate_region_bounds(region, param_bounds, "Demonic")
 
         x_lo, x_hi = region[0]
-        y_lo, y_hi = region[1]
 
         rect = patches.Rectangle(
-            (x_lo, y_lo),
+            (x_lo, rect_y),
             x_hi - x_lo,
-            y_hi - y_lo,
+            rect_height,
             linewidth=1,
             edgecolor='darkred',
             facecolor='red',
@@ -217,12 +217,11 @@ def plot_parameter_space(config: Dict[str, Any], log_entry: Dict[str, Any],
         validate_region_bounds(region, param_bounds, "Inconclusive")
 
         x_lo, x_hi = region[0]
-        y_lo, y_hi = region[1]
 
         rect = patches.Rectangle(
-            (x_lo, y_lo),
+            (x_lo, rect_y),
             x_hi - x_lo,
-            y_hi - y_lo,
+            rect_height,
             linewidth=1,
             edgecolor='gray',
             facecolor='gray',
@@ -233,16 +232,15 @@ def plot_parameter_space(config: Dict[str, Any], log_entry: Dict[str, Any],
 
     # Set labels
     xlabel = format_latex_label(x_label if x_label else param_vars[0])
-    ylabel = format_latex_label(y_label if y_label else param_vars[1])
     ax.set_xlabel(xlabel, fontsize=12)
-    ax.set_ylabel(ylabel, fontsize=12)
+    ax.set_yticks([])  # Remove y-axis ticks for cleaner look
     # ax.set_title(f'Parameter Space - Experiment #{experiment_num}', fontsize=14)
 
     # # Add legend
-    # ax.legend(loc='best')
+    # ax.legend(loc='upper right')
 
-    # Add grid
-    ax.grid(True, linestyle='--', alpha=0.3)
+    # Add grid on x-axis only
+    ax.grid(True, axis='x', linestyle='--', alpha=0.3)
 
     # Save the plot
     plt.tight_layout()
@@ -254,8 +252,8 @@ def plot_parameter_space(config: Dict[str, Any], log_entry: Dict[str, Any],
 
 def main():
     """Main entry point."""
-    if len(sys.argv) < 3 or len(sys.argv) > 5:
-        print("Usage: python parameter_space_plotter.py <config.json> <experiment_number> [x_label] [y_label]")
+    if len(sys.argv) < 3 or len(sys.argv) > 4:
+        print("Usage: python parameter_space_plotter_1d.py <config.json> <experiment_number> [x_label]")
         sys.exit(1)
 
     config_file = sys.argv[1]
@@ -265,26 +263,25 @@ def main():
         print(f"Error: Experiment number must be an integer, got: {sys.argv[2]}")
         sys.exit(1)
 
-    # Optional axis labels
-    x_label = sys.argv[3] if len(sys.argv) >= 4 else None
-    y_label = sys.argv[4] if len(sys.argv) == 5 else None
+    # Optional x-axis label
+    x_label = sys.argv[3] if len(sys.argv) == 4 else None
 
     # Load configuration
     print(f"Loading configuration from: {config_file}")
     config = load_config(config_file)
 
-    # Check if parameter space is 2D
+    # Check if parameter space is 1D
     param_vars = config['system'].get('param_vars', [])
-    if len(param_vars) != 2:
+    if len(param_vars) != 1:
         raise ValueError(
-            f"Plotting is only supported for 2D parameter spaces. "
+            f"This plotter is only for 1D parameter spaces. "
             f"Found {len(param_vars)} parameter(s): {param_vars}"
         )
 
     param_bounds = config['system'].get('param_bounds', [])
-    if len(param_bounds) != 2:
+    if len(param_bounds) != 1:
         raise ValueError(
-            f"Parameter bounds must have 2 dimensions for 2D plotting. "
+            f"Parameter bounds must have 1 dimension for 1D plotting. "
             f"Found {len(param_bounds)} dimension(s)."
         )
 
@@ -322,7 +319,7 @@ def main():
     output_path = f"./experiment_{experiment_num}_{config_name}.png"
 
     # Create the plot
-    plot_parameter_space(config, log_entry, experiment_num, output_path, x_label, y_label)
+    plot_parameter_space_1d(config, log_entry, experiment_num, output_path, x_label)
 
 
 if __name__ == "__main__":

@@ -55,11 +55,11 @@
     "simplified_parametric": true,
     "param_refinement_threshold": 0.1,
     "cutoff_time_per_smt_query": 10,
-    "target_probability": 0.95,
+    "target_probability": 0.9,
     "degree": 1,
     "smt_solver": "z3",
     "entailment_solver": "farkas",
     "output_smt_path": "./tmp/temporary_polyhorn_input.smt2",
-    "refinement_mode": 2,
+    "refinement_mode": "none",
     "logfile": "./results.log"
 }

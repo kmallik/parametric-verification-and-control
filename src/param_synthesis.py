@@ -403,7 +403,8 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                           overall_timeout: Optional[float] = None,
                           logfile: Optional[str] = None,
                           config_file: Optional[str] = None,
-                          exploration_rate: float = 0.3) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                          exploration_rate: float = 0.3,
+                          merge_inconclusive: bool = True) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """Iteratively refine parameter space to find angelic and demonic winning regions.
 
     First finds angelic winning regions (exists controller satisfying spec).
@@ -424,6 +425,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         max_inconclusive: Maximum fraction of parameter space that can remain inconclusive (required for mode 3).
             Can be a single float or a list of floats. If a list, snapshots are taken at each threshold.
         overall_timeout: Optional overall timeout in seconds for the entire refinement (mode 3).
+        merge_inconclusive: If True (default), adjacent inconclusive regions are merged. If False, regions are returned unmerged.
 
     Returns:
         Tuple of (angelic_regions, demonic_regions, timed_out_regions):
@@ -563,7 +565,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 # Also include bounds from active jobs as inconclusive in snapshot
                 for job in active_jobs:
                     snap_inconclusive.append({'param_bounds': job['bounds'], 'depth': job['depth']})
-                snap_inconclusive_merged = merge_adjacent_regions(snap_inconclusive)
+                snap_inconclusive_merged = merge_adjacent_regions(snap_inconclusive) if merge_inconclusive else snap_inconclusive
                 print(f"\n*** SNAPSHOT at epsilon={crossed}: inconclusive fraction={inconclusive_fraction:.6f}, runtime={snap_runtime:.2f}s ***")
                 if logfile and config_file:
                     write_to_logfile(logfile, config_file, list(angelic_regions), list(demonic_regions),
@@ -616,7 +618,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                     rb, rd = queue.pop(0)
                     timed_out_regions.append({'param_bounds': rb, 'depth': rd})
                 snap_runtime = time.time() - refinement_start_time
-                snap_inconclusive_merged = merge_adjacent_regions(timed_out_regions)
+                snap_inconclusive_merged = merge_adjacent_regions(timed_out_regions) if merge_inconclusive else timed_out_regions
                 for crossed in pending_thresholds:
                     print(f"*** SNAPSHOT at epsilon={crossed} (overall timeout): runtime={snap_runtime:.2f}s ***")
                     if logfile and config_file:
@@ -763,9 +765,12 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 print(f"  Region {i}: {region_info['param_bounds']}")
         print(f"{'='*80}\n")
 
-        merged_inconclusive = merge_adjacent_regions(timed_out_regions)
-        if len(timed_out_regions) != len(merged_inconclusive):
-            print(f"Merged {len(timed_out_regions)} inconclusive regions into {len(merged_inconclusive)} regions.")
+        if merge_inconclusive:
+            merged_inconclusive = merge_adjacent_regions(timed_out_regions)
+            if len(timed_out_regions) != len(merged_inconclusive):
+                print(f"Merged {len(timed_out_regions)} inconclusive regions into {len(merged_inconclusive)} regions.")
+        else:
+            merged_inconclusive = timed_out_regions
 
         return angelic_regions, demonic_regions, merged_inconclusive
 
@@ -945,9 +950,12 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 print(f"  Region {i}: {region_info['param_bounds']}")
         print(f"{'='*80}\n")
 
-        merged_inconclusive = merge_adjacent_regions(timed_out_regions)
-        if len(timed_out_regions) != len(merged_inconclusive):
-            print(f"Merged {len(timed_out_regions)} inconclusive regions into {len(merged_inconclusive)} regions.")
+        if merge_inconclusive:
+            merged_inconclusive = merge_adjacent_regions(timed_out_regions)
+            if len(timed_out_regions) != len(merged_inconclusive):
+                print(f"Merged {len(timed_out_regions)} inconclusive regions into {len(merged_inconclusive)} regions.")
+        else:
+            merged_inconclusive = timed_out_regions
 
         return angelic_regions, demonic_regions, merged_inconclusive
 
@@ -1365,10 +1373,12 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
               f"that are contained in winning regions.")
 
     # Merge adjacent inconclusive regions
-    merged_inconclusive = merge_adjacent_regions(truly_inconclusive)
-
-    if len(truly_inconclusive) != len(merged_inconclusive):
-        print(f"Merged {len(truly_inconclusive)} inconclusive regions into {len(merged_inconclusive)} regions.")
+    if merge_inconclusive:
+        merged_inconclusive = merge_adjacent_regions(truly_inconclusive)
+        if len(truly_inconclusive) != len(merged_inconclusive):
+            print(f"Merged {len(truly_inconclusive)} inconclusive regions into {len(merged_inconclusive)} regions.")
+    else:
+        merged_inconclusive = truly_inconclusive
 
     return angelic_regions, demonic_regions, merged_inconclusive
 
@@ -1435,6 +1445,10 @@ def main():
         if refinement_mode == 3:
             print(f"Exploration rate: {exploration_rate}")
 
+        merge_inconclusive = config.get('merge_inconclusive_regions', True)
+        if not merge_inconclusive:
+            print("Inconclusive region merging: DISABLED")
+
         start_time = time.time()
 
         logfile = config.get('logfile')
@@ -1442,7 +1456,8 @@ def main():
         angelic_regions, demonic_regions, timed_out_regions = refine_parameter_space(
             config, entailment_solver, degree, smt_solver, threshold, refinement_mode, cutoff_time,
             max_inconclusive=max_inconclusive, overall_timeout=overall_timeout,
-            logfile=logfile, config_file=config_file, exploration_rate=exploration_rate
+            logfile=logfile, config_file=config_file, exploration_rate=exploration_rate,
+            merge_inconclusive=merge_inconclusive
         )
 
         runtime = time.time() - start_time
@@ -1471,7 +1486,8 @@ def main():
             print(f"    Certificate: {model_info['model']}")
 
         if timed_out_regions:
-            print(f"\n--- INCONCLUSIVE REGIONS (Merged) ---")
+            merge_label = "Merged" if merge_inconclusive else "Unmerged"
+            print(f"\n--- INCONCLUSIVE REGIONS ({merge_label}) ---")
             print(f"(Neither angelic nor demonic winning determined)")
             print(f"Total: {len(timed_out_regions)}")
             for i, region_info in enumerate(timed_out_regions, 1):

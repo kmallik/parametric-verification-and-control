@@ -62,5 +62,6 @@
     "entailment_solver": "farkas",
     "output_smt_path": "./tmp/temporary_polyhorn_input.smt2",
     "refinement_mode": 3,
+    "merge_inconclusive_regions": false,
     "logfile": "./final_results/results_add_mathsat.log"
 }

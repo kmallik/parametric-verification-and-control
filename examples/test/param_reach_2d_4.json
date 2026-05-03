@@ -108,5 +108,6 @@
     "entailment_solver": "farkas",
     "output_smt_path": "./tmp/temporary_polyhorn_input.smt2",
     "refinement_mode": 2,
-    "logfile": "./results.log"
+    "logfile": "./results.log",
+    "merge_inconclusive_regions": false
 }

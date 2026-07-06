@@ -237,13 +237,24 @@ def merge_adjacent_regions(regions: List[Dict]) -> List[Dict]:
 
 def write_to_logfile(logfile: str, config_file: str, angelic_regions: List[Dict],
                      demonic_regions: List[Dict], inconclusive_regions: List[Dict],
-                     runtime: float, refinement_mode: Optional[int] = None,
-                     epsilon: Optional[float] = None) -> None:
+                     runtime: float, smt_stats: Dict[str, int],
+                     refinement_mode: Optional[int] = None,
+                     epsilon: Optional[float] = None,
+                     merge_inconclusive: bool = True) -> None:
     """Write experimental results to a logfile.
 
     Appends the results to the logfile, creating it if it doesn't exist.
     Includes date, time, input filename, runtime, refinement mode, and experimental results.
     Experiment entries are numbered sequentially.
+
+    Args:
+        smt_stats: Dictionary with keys:
+            - 'total_smt_calls': Total number of SMT solver invocations
+            - 'sat_count': Number of SAT results
+            - 'unsat_count': Number of UNSAT results
+            - 'inconclusive_count': Number of inconclusive/timeout results
+            - 'max_depth': Maximum depth of the refinement tree
+            - 'num_template_vars': Number of unknown variables in the templates
     """
     import re
 
@@ -282,6 +293,16 @@ def write_to_logfile(logfile: str, config_file: str, angelic_regions: List[Dict]
         f.write(f"Total runtime: {runtime:.2f} seconds\n")
         f.write(f"\n")
 
+        # SMT solver statistics
+        f.write(f"--- SMT SOLVER STATISTICS ---\n")
+        f.write(f"Total SMT calls: {smt_stats['total_smt_calls']}\n")
+        f.write(f"SAT results: {smt_stats['sat_count']}\n")
+        f.write(f"UNSAT results: {smt_stats['unsat_count']}\n")
+        f.write(f"Inconclusive results: {smt_stats['inconclusive_count']}\n")
+        f.write(f"Max refinement depth: {smt_stats['max_depth']}\n")
+        f.write(f"Template unknowns: {smt_stats['num_template_vars']}\n")
+        f.write(f"\n")
+
         # Angelic regions
         f.write(f"--- ANGELIC WINNING REGIONS ---\n")
         f.write(f"(Exists controller satisfying the specification)\n")
@@ -309,7 +330,8 @@ def write_to_logfile(logfile: str, config_file: str, angelic_regions: List[Dict]
         f.write(f"\n")
 
         # Inconclusive regions
-        f.write(f"--- INCONCLUSIVE REGIONS (Merged) ---\n")
+        merge_label = "Merged" if merge_inconclusive else "Unmerged"
+        f.write(f"--- INCONCLUSIVE REGIONS ({merge_label}) ---\n")
         f.write(f"(Neither angelic nor demonic winning determined)\n")
         f.write(f"Total: {len(inconclusive_regions)}\n")
         for i, region_info in enumerate(inconclusive_regions, 1):
@@ -404,7 +426,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                           logfile: Optional[str] = None,
                           config_file: Optional[str] = None,
                           exploration_rate: float = 0.3,
-                          merge_inconclusive: bool = True) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                          merge_inconclusive: bool = True) -> Tuple[List[Dict], List[Dict], List[Dict], Dict[str, int]]:
     """Iteratively refine parameter space to find angelic and demonic winning regions.
 
     First finds angelic winning regions (exists controller satisfying spec).
@@ -428,10 +450,11 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         merge_inconclusive: If True (default), adjacent inconclusive regions are merged. If False, regions are returned unmerged.
 
     Returns:
-        Tuple of (angelic_regions, demonic_regions, timed_out_regions):
+        Tuple of (angelic_regions, demonic_regions, timed_out_regions, smt_stats):
         - angelic_regions: List of dicts with 'param_bounds', 'model' for angelic winning regions
         - demonic_regions: List of dicts with 'param_bounds', 'model' for demonic winning regions
         - timed_out_regions: List of dicts with 'param_bounds' for regions that timed out (neither angelic nor demonic)
+        - smt_stats: Dict with 'total_smt_calls', 'sat_count', 'unsat_count', 'inconclusive_count', 'max_depth', 'num_template_vars'
     """
 
     if 'param_bounds' not in config['system']:
@@ -489,6 +512,34 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
             _file_counter += 1
             return _file_counter
 
+    def count_template_variables() -> int:
+        """Count the number of unknown template variables by running the generator once."""
+        generator = SRSMGenerator()
+        dummy_path = "./tmp/dummy_count_template_vars.smt2"
+        has_target = 'target_region' in config
+        has_unsafe = 'unsafe_region' in config
+        target_probability = config.get('target_probability', 1.0)
+
+        try:
+            if has_target and not has_unsafe:
+                if target_probability < 1.0:
+                    generator.generate_smt_file_quantitative_reach_simplified(config, dummy_path, override_param_bounds=initial_param_bounds)
+                else:
+                    generator.generate_smt_file_qualitative_reach_simplified(config, dummy_path, override_param_bounds=initial_param_bounds)
+            elif has_unsafe and not has_target:
+                if target_probability < 1.0:
+                    generator.generate_smt_file_quantitative_safety_simplified(config, dummy_path, override_param_bounds=initial_param_bounds)
+            # Clean up dummy file
+            if os.path.exists(dummy_path):
+                os.remove(dummy_path)
+        except Exception:
+            pass
+        # constant_counter starts at 1, so subtract 1 for actual count
+        return generator.constant_counter - 1
+
+    # Compute template variables count once at the start
+    num_template_vars = count_template_variables()
+
     # Mode 3: Epsilon-based parallel angelic/demonic with multi-region concurrency
     if refinement_mode == 3:
         if max_inconclusive is None:
@@ -521,6 +572,16 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         demonic_regions = []
         timed_out_regions = []
         sat_centers = []  # Centers of all SAT regions found so far
+
+        # Statistics tracking
+        smt_stats = {
+            'total_smt_calls': 0,
+            'sat_count': 0,
+            'unsat_count': 0,
+            'inconclusive_count': 0,
+            'max_depth': 0,
+            'num_template_vars': num_template_vars
+        }
 
         def _region_center(bounds):
             """Compute the center point of a rectangular region."""
@@ -569,7 +630,8 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 print(f"\n*** SNAPSHOT at epsilon={crossed}: inconclusive fraction={inconclusive_fraction:.6f}, runtime={snap_runtime:.2f}s ***")
                 if logfile and config_file:
                     write_to_logfile(logfile, config_file, list(angelic_regions), list(demonic_regions),
-                                   snap_inconclusive_merged, snap_runtime, refinement_mode, epsilon=crossed)
+                                   snap_inconclusive_merged, snap_runtime, smt_stats, refinement_mode, epsilon=crossed,
+                                   merge_inconclusive=merge_inconclusive)
             return inconclusive_fraction <= final_epsilon
 
         def _terminate_all_active():
@@ -586,6 +648,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
 
         def _launch_job(bounds, depth):
             """Launch an angelic/demonic pair for the given region."""
+            nonlocal smt_stats
             fid_a = get_unique_file_id()
             fid_d = get_unique_file_id()
             aq = multiprocessing.Queue()
@@ -598,6 +661,9 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
             print(f"{indent}Exploring region: {bounds} (launching angelic+demonic pair)")
             a_proc.start()
             d_proc.start()
+            # Track statistics
+            smt_stats['total_smt_calls'] += 2  # angelic + demonic
+            smt_stats['max_depth'] = max(smt_stats['max_depth'], depth)
             active_jobs.append({
                 'bounds': bounds, 'depth': depth,
                 'angelic_proc': a_proc, 'demonic_proc': d_proc,
@@ -623,7 +689,8 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                     print(f"*** SNAPSHOT at epsilon={crossed} (overall timeout): runtime={snap_runtime:.2f}s ***")
                     if logfile and config_file:
                         write_to_logfile(logfile, config_file, list(angelic_regions), list(demonic_regions),
-                                       list(snap_inconclusive_merged), snap_runtime, refinement_mode, epsilon=crossed)
+                                       list(snap_inconclusive_merged), snap_runtime, smt_stats, refinement_mode, epsilon=crossed,
+                                       merge_inconclusive=merge_inconclusive)
                 pending_thresholds.clear()
                 break
 
@@ -660,6 +727,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                         for proc in [job['angelic_proc'], job['demonic_proc']]:
                             if proc.is_alive():
                                 proc.terminate()
+                                smt_stats['inconclusive_count'] += 1  # timed out process
                         job['angelic_done'] = True
                         job['demonic_done'] = True
 
@@ -672,6 +740,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                         job['angelic_result'] = ('error', 'No result', None)
 
                     if job['angelic_result'][0] == 'success' and job['angelic_result'][1] == 'sat':
+                        smt_stats['sat_count'] += 1
                         computation_time = time.time() - job['start_time']
                         print(f"{indent}✓ ANGELIC SAT for {job['bounds']} (time: {computation_time:.2f}s)")
                         if job['demonic_proc'].is_alive():
@@ -679,6 +748,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                             job['demonic_proc'].join(timeout=1)
                             if job['demonic_proc'].is_alive():
                                 job['demonic_proc'].kill()
+                            smt_stats['inconclusive_count'] += 1  # demonic was terminated
                         angelic_regions.append({
                             'param_bounds': job['bounds'],
                             'model': job['angelic_result'][2],
@@ -692,6 +762,10 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                         print(f"{indent}  [Inconclusive fraction: {frac:.6f}]")
                         completed_indices.append(idx)
                         continue
+                    elif job['angelic_result'][0] == 'success' and job['angelic_result'][1] == 'unsat':
+                        smt_stats['unsat_count'] += 1
+                    else:
+                        smt_stats['inconclusive_count'] += 1
 
                 # Check demonic
                 if not job['demonic_done'] and not job['demonic_proc'].is_alive():
@@ -702,6 +776,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                         job['demonic_result'] = ('error', 'No result', None)
 
                     if job['demonic_result'][0] == 'success' and job['demonic_result'][1] == 'sat':
+                        smt_stats['sat_count'] += 1
                         computation_time = time.time() - job['start_time']
                         print(f"{indent}✓ DEMONIC SAT for {job['bounds']} (time: {computation_time:.2f}s)")
                         if job['angelic_proc'].is_alive():
@@ -709,6 +784,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                             job['angelic_proc'].join(timeout=1)
                             if job['angelic_proc'].is_alive():
                                 job['angelic_proc'].kill()
+                            smt_stats['inconclusive_count'] += 1  # angelic was terminated
                         demonic_regions.append({
                             'param_bounds': job['bounds'],
                             'model': job['demonic_result'][2],
@@ -722,6 +798,10 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                         print(f"{indent}  [Inconclusive fraction: {frac:.6f}]")
                         completed_indices.append(idx)
                         continue
+                    elif job['demonic_result'][0] == 'success' and job['demonic_result'][1] == 'unsat':
+                        smt_stats['unsat_count'] += 1
+                    else:
+                        smt_stats['inconclusive_count'] += 1
 
                 # Both done, no SAT found
                 if job['angelic_done'] and job['demonic_done'] and not job['found_sat']:
@@ -772,7 +852,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         else:
             merged_inconclusive = timed_out_regions
 
-        return angelic_regions, demonic_regions, merged_inconclusive
+        return angelic_regions, demonic_regions, merged_inconclusive, smt_stats
 
     # Mode 2: run angelic and demonic queries in parallel for each region (one at a time)
     if refinement_mode == 2:
@@ -787,10 +867,21 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         demonic_regions = []
         timed_out_regions = []
 
+        # Statistics tracking
+        smt_stats = {
+            'total_smt_calls': 0,
+            'sat_count': 0,
+            'unsat_count': 0,
+            'inconclusive_count': 0,
+            'max_depth': 0,
+            'num_template_vars': num_template_vars
+        }
+
         while queue:
             current_bounds, depth = queue.popleft()
             indent = "  " * depth
             width = compute_width(current_bounds)
+            smt_stats['max_depth'] = max(smt_stats['max_depth'], depth)
 
             print(f"{indent}Exploring region: {current_bounds} (width: {width:.6f})")
 
@@ -822,6 +913,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
             print(f"{indent}Running angelic and demonic queries in parallel...")
             angelic_process.start()
             demonic_process.start()
+            smt_stats['total_smt_calls'] += 2
 
             # Poll both processes until one returns SAT or both complete
             angelic_result = None
@@ -839,8 +931,10 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                     print(f"{indent}⏱ TIMEOUT")
                     if angelic_process.is_alive():
                         angelic_process.terminate()
+                        smt_stats['inconclusive_count'] += 1
                     if demonic_process.is_alive():
                         demonic_process.terminate()
+                        smt_stats['inconclusive_count'] += 1
                     break
 
                 # Check angelic
@@ -852,6 +946,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                         angelic_result = ('error', 'No result', None)
 
                     if angelic_result[0] == 'success' and angelic_result[1] == 'sat':
+                        smt_stats['sat_count'] += 1
                         computation_time = time.time() - start_time
                         print(f"{indent}✓ ANGELIC SAT - terminating demonic query (time: {computation_time:.2f}s)")
                         if demonic_process.is_alive():
@@ -859,6 +954,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                             demonic_process.join(timeout=1)
                             if demonic_process.is_alive():
                                 demonic_process.kill()
+                            smt_stats['inconclusive_count'] += 1
                         angelic_regions.append({
                             'param_bounds': current_bounds,
                             'model': angelic_result[2],
@@ -867,6 +963,10 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                         })
                         found_sat = True
                         break
+                    elif angelic_result[0] == 'success' and angelic_result[1] == 'unsat':
+                        smt_stats['unsat_count'] += 1
+                    else:
+                        smt_stats['inconclusive_count'] += 1
 
                 # Check demonic
                 if not demonic_done and not demonic_process.is_alive():
@@ -877,6 +977,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                         demonic_result = ('error', 'No result', None)
 
                     if demonic_result[0] == 'success' and demonic_result[1] == 'sat':
+                        smt_stats['sat_count'] += 1
                         computation_time = time.time() - start_time
                         print(f"{indent}✓ DEMONIC SAT - terminating angelic query (time: {computation_time:.2f}s)")
                         if angelic_process.is_alive():
@@ -884,6 +985,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                             angelic_process.join(timeout=1)
                             if angelic_process.is_alive():
                                 angelic_process.kill()
+                            smt_stats['inconclusive_count'] += 1
                         demonic_regions.append({
                             'param_bounds': current_bounds,
                             'model': demonic_result[2],
@@ -892,6 +994,10 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                         })
                         found_sat = True
                         break
+                    elif demonic_result[0] == 'success' and demonic_result[1] == 'unsat':
+                        smt_stats['unsat_count'] += 1
+                    else:
+                        smt_stats['inconclusive_count'] += 1
 
                 time.sleep(0.1)
 
@@ -957,7 +1063,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
         else:
             merged_inconclusive = timed_out_regions
 
-        return angelic_regions, demonic_regions, merged_inconclusive
+        return angelic_regions, demonic_regions, merged_inconclusive, smt_stats
 
     # Mode 0 and Mode 1: Sequential phases (angelic first, then demonic on complement)
     # Mode 0: Serial exploration of children
@@ -966,10 +1072,22 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
     print(f"REFINEMENT {mode_desc}: Angelic phase first, then demonic on complement")
     print(f"{'='*80}\n")
 
+    # Statistics tracking for modes 0 and 1
+    smt_stats = {
+        'total_smt_calls': 0,
+        'sat_count': 0,
+        'unsat_count': 0,
+        'inconclusive_count': 0,
+        'max_depth': 0,
+        'num_template_vars': num_template_vars
+    }
+
     # If no cutoff time, use the recursive approach
     if cutoff_time is None:
         def explore_region(current_bounds: List[Tuple[float, float]], depth: int = 0) -> List[Dict]:
             """Recursively explore parameter region."""
+            nonlocal smt_stats
+            smt_stats['max_depth'] = max(smt_stats['max_depth'], depth)
             indent = "  " * depth
             width = compute_width(current_bounds)
 
@@ -1012,20 +1130,25 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
             generator.generate_config_file(entailment_solver, degree, smt_solver, output_path, config_path, temp_output_path)
 
             print(f"{indent}Running PolyQnt solver...")
+            smt_stats['total_smt_calls'] += 1
             try:
                 is_sat, model = execute(formula=output_path, config=config_path)
             except Exception as e:
                 print(f"{indent}Error: {e}")
+                smt_stats['inconclusive_count'] += 1
                 return []
 
             print(f"{indent}Result: {is_sat}")
 
             if is_sat == 'sat':
+                smt_stats['sat_count'] += 1
                 computation_time = time.time() - region_start_time
                 print(f"{indent}✓ SAT region found! (time: {computation_time:.2f}s)")
                 return [{'param_bounds': current_bounds, 'model': model, 'is_sat': 'sat', 'computation_time': computation_time}]
 
-            # UNSAT - check if children would be below threshold before splitting
+            # UNSAT
+            smt_stats['unsat_count'] += 1
+            # Check if children would be below threshold before splitting
             max_dim = max(range(len(current_bounds)),
                          key=lambda d: current_bounds[d][1] - current_bounds[d][0])
             left_bounds, right_bounds = split_bounds(current_bounds, max_dim)
@@ -1070,6 +1193,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
             current_bounds, depth = queue.popleft()
             indent = "  " * depth
             width = compute_width(current_bounds)
+            smt_stats['max_depth'] = max(smt_stats['max_depth'], depth)
 
             print(f"{indent}Exploring region: {current_bounds} (width: {width:.6f})")
 
@@ -1078,6 +1202,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
 
             # Run SMT query with timeout using multiprocessing.Process
             print(f"{indent}Running PolyQnt solver (timeout: {cutoff_time}s)...")
+            smt_stats['total_smt_calls'] += 1
 
             args = (current_bounds, config, entailment_solver, degree, smt_solver, file_id)
 
@@ -1102,6 +1227,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 if process.is_alive():
                     process.kill()  # Force kill if still alive
                     process.join()
+                smt_stats['inconclusive_count'] += 1
 
                 # If below threshold, mark as timed out; otherwise check if children would be below threshold
                 if width <= threshold:
@@ -1132,23 +1258,28 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                     is_sat, model = result[1], result[2]
                 else:
                     print(f"{indent}Error: {result[1]}")
+                    smt_stats['inconclusive_count'] += 1
                     continue
             except Exception as e:
                 print(f"{indent}Error getting result: {e}")
+                smt_stats['inconclusive_count'] += 1
                 continue
 
             print(f"{indent}Result: {is_sat}")
 
             if is_sat == 'sat':
+                smt_stats['sat_count'] += 1
                 computation_time = time.time() - region_start_time
                 print(f"{indent}✓ SAT region found! (time: {computation_time:.2f}s)")
                 sat_regions.append({'param_bounds': current_bounds, 'model': model, 'is_sat': 'sat', 'computation_time': computation_time})
 
             elif width <= threshold:
+                smt_stats['unsat_count'] += 1
                 print(f"{indent}✗ UNSAT (below threshold)")
                 # Don't add children
 
             else:
+                smt_stats['unsat_count'] += 1
                 # Check if children would be below threshold before splitting
                 max_dim = max(range(len(current_bounds)),
                              key=lambda d: current_bounds[d][1] - current_bounds[d][0])
@@ -1212,6 +1343,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
             current_bounds, depth = queue.popleft()
             indent = "  " * depth
             width = compute_width(current_bounds)
+            smt_stats['max_depth'] = max(smt_stats['max_depth'], depth)
 
             print(f"{indent}[Demonic] Exploring region: {current_bounds} (width: {width:.6f})")
 
@@ -1243,20 +1375,25 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                     generator.generate_config_file(entailment_solver, degree, smt_solver, output_path, config_path, temp_output_path)
 
                     print(f"{indent}[Demonic] Running PolyQnt solver...")
+                    smt_stats['total_smt_calls'] += 1
                     is_sat, model = execute(formula=output_path, config=config_path)
                 except Exception as e:
                     print(f"{indent}[Demonic] Error: {e}")
+                    smt_stats['inconclusive_count'] += 1
                     continue
 
                 print(f"{indent}[Demonic] Result: {is_sat}")
 
                 if is_sat == 'sat':
+                    smt_stats['sat_count'] += 1
                     computation_time = time.time() - region_start_time
                     print(f"{indent}[Demonic] ✓ Demonic winning region found! ({computation_time:.2f}s)")
                     demonic_regions.append({'param_bounds': current_bounds, 'model': model, 'is_sat': 'sat', 'computation_time': computation_time})
                 elif width <= threshold:
+                    smt_stats['unsat_count'] += 1
                     print(f"{indent}[Demonic] ✗ UNSAT (below threshold)")
                 else:
+                    smt_stats['unsat_count'] += 1
                     # Check if children would be below threshold before splitting
                     max_dim = max(range(len(current_bounds)),
                                  key=lambda d: current_bounds[d][1] - current_bounds[d][0])
@@ -1273,6 +1410,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                 # With timeout - use subprocess
                 region_start_time = time.time()
                 print(f"{indent}[Demonic] Running PolyQnt solver (timeout: {cutoff_time}s)...")
+                smt_stats['total_smt_calls'] += 1
 
                 args = (current_bounds, config, entailment_solver, degree, smt_solver, file_id)
 
@@ -1291,6 +1429,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                     if process.is_alive():
                         process.kill()
                         process.join()
+                    smt_stats['inconclusive_count'] += 1
 
                     if width <= threshold:
                         print(f"{indent}[Demonic] ⏱ Region at minimum granularity - marking as timed out")
@@ -1318,20 +1457,25 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
                         is_sat, model = result[1], result[2]
                     else:
                         print(f"{indent}[Demonic] Error: {result[1]}")
+                        smt_stats['inconclusive_count'] += 1
                         continue
                 except Exception as e:
                     print(f"{indent}[Demonic] Error getting result: {e}")
+                    smt_stats['inconclusive_count'] += 1
                     continue
 
                 print(f"{indent}[Demonic] Result: {is_sat}")
 
                 if is_sat == 'sat':
+                    smt_stats['sat_count'] += 1
                     computation_time = time.time() - region_start_time
                     print(f"{indent}[Demonic] ✓ Demonic winning region found! ({computation_time:.2f}s)")
                     demonic_regions.append({'param_bounds': current_bounds, 'model': model, 'is_sat': 'sat', 'computation_time': computation_time})
                 elif width <= threshold:
+                    smt_stats['unsat_count'] += 1
                     print(f"{indent}[Demonic] ✗ UNSAT (below threshold)")
                 else:
+                    smt_stats['unsat_count'] += 1
                     # Check if children would be below threshold before splitting
                     max_dim = max(range(len(current_bounds)),
                                  key=lambda d: current_bounds[d][1] - current_bounds[d][0])
@@ -1380,7 +1524,7 @@ def refine_parameter_space(config: Dict[str, Any], entailment_solver: str,
     else:
         merged_inconclusive = truly_inconclusive
 
-    return angelic_regions, demonic_regions, merged_inconclusive
+    return angelic_regions, demonic_regions, merged_inconclusive, smt_stats
 
 
 def main():
@@ -1453,7 +1597,7 @@ def main():
 
         logfile = config.get('logfile')
 
-        angelic_regions, demonic_regions, timed_out_regions = refine_parameter_space(
+        angelic_regions, demonic_regions, timed_out_regions, smt_stats = refine_parameter_space(
             config, entailment_solver, degree, smt_solver, threshold, refinement_mode, cutoff_time,
             max_inconclusive=max_inconclusive, overall_timeout=overall_timeout,
             logfile=logfile, config_file=config_file, exploration_rate=exploration_rate,
@@ -1498,7 +1642,8 @@ def main():
         # Write to logfile if specified (mode 3 already writes snapshots incrementally)
         if logfile and refinement_mode != 3:
             write_to_logfile(logfile, config_file, angelic_regions, demonic_regions,
-                           timed_out_regions, runtime, refinement_mode)
+                           timed_out_regions, runtime, smt_stats, refinement_mode,
+                           merge_inconclusive=merge_inconclusive)
 
         return angelic_regions, demonic_regions, timed_out_regions
 

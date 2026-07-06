@@ -53,9 +53,9 @@
         ]
     },
     "param_refinement_threshold": 0.1,
-    "max_inconclusive": [0.4,0.3, 0.2, 0.15],
+    "max_inconclusive": [0.4,0.3, 0.2, 0.16, 0.15],
     "overall_timeout": 21600,
-    "cutoff_time_per_smt_query": 20,
+    "cutoff_time_per_smt_query": 8,
     "target_probability": 0.9,
     "degree": 1,
     "smt_solver": "mathsat",

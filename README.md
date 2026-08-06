@@ -1,346 +1,336 @@
-# Parametric Verification and Control
+# ATVA 2026 Artifact: Supermartingale Certificates for Parametric MDPs
 
-A tool for synthesizing controllers and verifying stochastic systems with parametric uncertainty. The tool finds **angelic winning regions** (parameter values for which a controller exists satisfying the specification) and **demonic winning regions** (parameter values for which no controller can satisfy the specification).
+This artifact accompanies the paper "Supermartingale Certificates for Parametric MDPs" accepted at ATVA 2026.
 
-## Installation
+## Overview
+
+This artifact contains:
+- The parametric MDP verification tool implementation (Python 3.12+)
+- All benchmark instances from Section 7 of the paper
+- Scripts to reproduce the experimental results (Table 1 and Figure 1)
+- Pre-downloaded dependencies for offline Docker build
+
+The tool synthesizes parametric supermartingale certificates for continuous-space parametric Markov Decision Processes (pMDPs) using SMT-based abstraction-refinement.
+
+## Getting Started
+
+## Hardware and Software Requirements
+
+### Requirements for the smoke test and a partial run
+- **OS**: Linux (Ubuntu 22.04 or compatible)
+- **Memory**: 16 GB RAM (recommended: 32 GB)
+- **CPU Cores**: 8 (recommended: 14)
+- **Disk Space**: 2 GB
+- **Software**: Docker
+
+### Recommended for the full run 
+- **Memory**: 128 GB RAM
+- **CPU Cores**: 72
+- **Everything else**: as above
+
+### Software Dependencies (included in Docker image)
+- Python 3.12+
+- PolyQEnt >= 0.0.15 (SMT solver interface)
+- PySMT >= 0.9.6
+- NumPy >= 2.0.0
+- Lark >= 1.3.0
+- Z3 and MathSAT5 solvers
+
+All dependencies are pre-downloaded and included in the `offline_dependencies/` directory for reproducibility.
+
+### Installation
+
+The artifact includes pre-downloaded dependencies in the `offline_dependencies/` directory for reproducible builds.
+
+**Default Build (Recommended)**
+
+Build using the pre-downloaded offline dependencies (you may need to add "sudo" before docker commands):
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Pull the base Python image (one-time, requires internet)
+docker pull python:3.12-slim-bookworm
+
+# Build the Docker image (uses offline dependencies, no internet needed)
+docker build -t atva2026-artifact .
+
+# Run the container interactively (no internet needed)
+docker run -it atva2026-artifact bash
 ```
 
-Requires:
-- Python 3.8+
-- Z3 SMT solver
-- PolyQnt (polynomial quantifier elimination)
+**Internet requirements:**
+- **One-time**: Pull base Docker image (`docker pull python:3.12-slim-bookworm`)
+- **During build**: None - Python packages and MathSAT solver are installed from included offline files
+- **Once built**: Container requires no internet to run experiments
 
-## Usage
+If the build fails, the offline dependencies may be missing or corrupted. Run `./download_dependencies.sh` to re-download them (requires internet).
+
+**Fallback: Online Build (Troubleshooting)**
+
+If the default build fails or your offline dependencies are corrupted, you can build using internet downloads:
 
 ```bash
-cd src
-python param_synthesis.py ../examples/param_reach_1d_1.json
+# Build using internet (downloads all dependencies during build)
+docker build -f Dockerfile.online -t atva2026-artifact .
+
+# Run the container interactively
+docker run -it atva2026-artifact bash
 ```
 
-## Input Configuration Format
+This downloads all dependencies from their original sources during the build. Use this option only if:
+- The default build fails
+- You need to rebuild without running `./download_dependencies.sh`
+- You want to use the latest package versions (less reproducible)
 
-The input is a JSON file specifying the system, specification, and solver options.
+**Note:** The offline dependencies (~60MB) are included in the artifact ZIP file for reproducible builds.
 
-### Complete Example
+### Smoke Test
 
-```json
-{
-  "system": {
-    "type": "cartesian",
-    "state_vars": ["S1", "S2"],
-    "param_vars": ["P1"],
-    "noise_vars": ["W1", "W2"],
-    "control_vars": ["U1"],
-    "state_bounds": [[-2, 150], [0, 100]],
-    "param_bounds": [[0.0, 3.0]],
-    "control_bounds": [[-1, 1]],
-    "initial_region": {
-      "bounds": [[2, 3], [0, 5]]
-    },
-    "dynamics": [
-      {
-        "condition": "0 <= S1 <= 100 and 0 <= S2 <= 50",
-        "transforms": {
-          "S1": "(+ S1 (+ U1 (+ W1 P1)))",
-          "S2": "(+ S2 W2)"
-        }
-      },
-      {
-        "condition": "S1 >= 100",
-        "transforms": {
-          "S1": "(+ S1 0)",
-          "S2": "(+ S2 0)"
-        }
-      }
-    ],
-    "noise_distribution": {
-      "type": "uniform",
-      "params": {"lower": [-1, -0.5], "upper": [1, 0.5]}
-    }
-  },
-  "target_region": {
-    "bounds": [[90, 150], [40, 100]]
-  },
-  "enable_param_refinement": true,
-  "param_refinement_threshold": 0.1,
-  "cutoff_time_per_smt_query": 10,
-  "parallel_refinement": true,
-  "target_probability": 0.95,
-  "degree": 1,
-  "smt_solver": "z3",
-  "entailment_solver": "farkas",
-  "output_smt_path": "./tmp/temporary_polyhorn_input.smt2"
-}
+To verify the installation, run the smoke test which tests both Z3 and MathSAT solvers:
+
+```bash
+# Using the automated script (recommended)
+./run_smoke_test.sh
 ```
 
-### System Configuration
+The automated script:
+- Tests both Z3 and MathSAT solvers separately
+- Generates a formatted results table
+- Provides a summary of working solvers
+- **Expected runtime**: Under 5 minutes
 
-#### Variables
+If one solver fails, you can still proceed with experiments using the working solver.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `type` | string | Must be `"cartesian"` |
-| `state_vars` | array of strings | State variable names (e.g., `["S1", "S2"]`) |
-| `param_vars` | array of strings | Parameter variable names (e.g., `["P1", "P2"]`) |
-| `noise_vars` | array of strings | Noise/disturbance variable names (e.g., `["W1", "W2"]`) |
-| `control_vars` | array of strings | Control input variable names (e.g., `["U1"]`) |
+**Expected Output**:
+- Initial and refined parameter space partitions
+- SAT/UNSAT/INCONCLUSIVE region counts after each refinement round
+- Final parameter regions with synthesized control strategies
+- Summary statistics including total SMT calls and execution time
+- A formatted table showing results for both solvers
 
-#### Bounds Format
+**Note**: If you see "ERROR: Solver mathsat is not installed" during the MathSAT test, this is expected if the MathSAT download failed. The smoke test will report which solvers are working. At minimum, Z3 should always be available.
 
-All bounds are specified as **arrays of `[lower, upper]` pairs**, one pair per variable in the corresponding variable list.
+### Partial Run (Ideal for Personal Computers)
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `state_bounds` | array of `[lower, upper]` | Domain bounds for each state variable |
-| `param_bounds` | array of `[lower, upper]` | Range for each parameter variable |
-| `control_bounds` | array of `[lower, upper]` | Bounds for each control input |
+For faster validation between the smoke test and the full run:
 
-**Example (2D system):**
-```json
-"state_vars": ["S1", "S2"],
-"state_bounds": [[-2, 150], [0, 100]]
-```
-This means:
-- `bounds[0] = [-2, 150]` applies to `state_vars[0] = "S1"` → `-2 <= S1 <= 150`
-- `bounds[1] = [0, 100]` applies to `state_vars[1] = "S2"` → `0 <= S2 <= 100`
-
-**Example (1D system with parameter):**
-```json
-"param_vars": ["P1"],
-"param_bounds": [[0.0, 3.0]]
-```
-This means: `0.0 <= P1 <= 3.0`
-
-**Example (2D parameters):**
-```json
-"param_vars": ["P1", "P2"],
-"param_bounds": [[-1.0, 1.0], [-1.0, 1.0]]
-```
-This means: `-1.0 <= P1 <= 1.0` and `-1.0 <= P2 <= 1.0`
-
-#### Initial Region
-
-```json
-"initial_region": {
-  "bounds": [[2, 3], [0, 5]]
-}
-```
-Specifies the set of initial states as a hyperrectangle. Format is the same as `state_bounds` - an array of `[lower, upper]` pairs, one per state variable.
-
-#### Dynamics
-
-Piecewise dynamics with conditions and transforms:
-
-```json
-"dynamics": [
-  {
-    "condition": "0 <= S1 <= 100",
-    "transforms": {"S1": "(+ S1 (+ U1 W1))"}
-  },
-  {
-    "condition": "S1 >= 100",
-    "transforms": {"S1": "(+ S1 0)"}
-  }
-]
+```bash
+./run_partial.sh
 ```
 
-**Condition Format:**
-- Simple inequalities: `"S1 >= 0"`, `"S1 <= 100"`, `"S1 > 0"`, `"S1 < 100"`
-- Chained inequalities: `"0 <= S1 <= 100"`
-- Conjunctions (use ` and ` with spaces): `"0 <= S1 <= 100 and 0 <= S2 <= 50"`
+This runs all 6 benchmarks with reduced epsilon thresholds (amounting to 2/5-th of rows of Table 1):
+- **M+ (additive)**: c = [0.4, 0.3]
+- **M× (multiplicative)**: c = [0.4, 0.3]
+- **M+,× (combined)**: c = [0.4, 0.3]
+- All with `cutoff_time_per_smt_query = 20s`
 
-**Transform Format (S-expressions):**
-- Addition: `(+ a b)`
-- Multiplication: `(* a b)`
-- Subtraction: `(- a b)` (binary only)
+Afterwards, this script will:
+- Save results to the `partial_run_results/` directory
+- Generate a formatted results table matching Table 1
+- Generate parameter space visualization figures
+- Display progress and timing for each experiment
+- Show a summary at the end
 
-Examples:
-- Identity: `"(+ S1 0)"`
-- Linear: `"(+ S1 (+ U1 W1))"` (S1 + U1 + W1)
-- With parameter: `"(+ S1 (+ U1 (+ W1 P1)))"` (S1 + U1 + W1 + P1)
-- Scaled: `"(+ (* 0.5 S1) W1)"` (0.5*S1 + W1)
-- Negative coefficient: `"(+ (* -1 S1) (* 2 S2))"` (-S1 + 2*S2)
+**Expected runtime**: 30-40 minutes
 
-#### Noise Distribution
+This provides a good balance between validation depth and runtime, allowing you to verify the tool works correctly before committing to the full run.
 
-```json
-"noise_distribution": {
-  "type": "uniform",
-  "params": {"lower": [-1, -0.5], "upper": [1, 0.5]}
-}
+### Full Run
+
+**IMPORTANT**: The full run was tested on a large server with 128 GB RAM, and it
+may crash personal computers with smaller RAM sizes. This is because our algorithm
+uses a partition refinement over the parameter space, with the full run
+pushing the number of partition elements to an enormous value. Our current
+implementation keeps track of the partition elements using a simple dynamic
+array. More space-efficient solutions are underway.
+
+To reproduce all results from Table 1 with a single command:
+
+```bash
+./run_full.sh
 ```
 
-Currently supported: `"uniform"` distribution with `lower` and `upper` bound arrays (one value per noise variable).
+This script will:
+- Run all benchmark configurations automatically
+- Save results to the `full_run_results/` directory
+- Generate a formatted results table matching Table 1
+- Generate parameter space visualization figures
+- Display progress and timing for each experiment
+- Show a summary at the end
 
-### Specification
+**Expected runtime**: 6 hours 
 
-Specify **either** `target_region` (reachability) **or** `unsafe_region` (safety), not both.
+## Step-by-Step Instructions
 
-#### Reachability Specification
+### Running Individual Benchmarks
 
-```json
-"target_region": {
-  "bounds": [[90, 150]]
-},
-"target_probability": 0.95
+The benchmarks are located in `examples/stable/`:
+
+| Benchmark | Configuration File |
+|-----------|-------------------|
+| M+ with Z3 | `LRW_1d_add_z3.json` |
+| M+ with MathSAT5 | `LRW_1d_add_mathsat.json` |
+| M× with Z3 | `LRW_1d_mul_z3.json` |
+| M× with MathSAT5 | `LRW_1d_mul_mathsat.json` |
+| M+,× with Z3 | `LRW_1d_add_mul_z3.json` |
+| M+,× with MathSAT5 | `LRW_1d_add_mul_mathsat.json` |
+
+
+To run a specific benchmark:
+
+```bash
+python3 src/param_synthesis.py <path-to-json-config>
 ```
 
-Synthesizes a controller that reaches the target region with probability >= `target_probability`.
-
-#### Safety Specification
-
-```json
-"unsafe_region": {
-  "bounds": [[90, 150]]
-},
-"target_probability": 0.95
+For example:
+```bash
+python3 src/param_synthesis.py examples/stable/LRW_1d_add_z3.json
+python3 src/param_synthesis.py examples/stable/LRW_1d_mul_mathsat.json
 ```
 
-Synthesizes a controller that avoids the unsafe region with probability >= `target_probability`.
+### Understanding the Output
 
-### Solver Options
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `degree` | int | required | Polynomial degree for certificate/controller templates |
-| `smt_solver` | string | required | SMT solver (`"z3"`) |
-| `entailment_solver` | string | required | Entailment solver (`"farkas"`) |
-| `enable_param_refinement` | bool | `false` | Enable parameter space refinement |
-| `param_refinement_threshold` | float | `0.01` | Minimum region size for refinement |
-| `cutoff_time_per_smt_query` | float | none | Timeout per SMT query (seconds) |
-| `parallel_refinement` | bool | `false` | Use parallel exploration of parameter space |
-| `output_smt_path` | string | required | Path for generated SMT file |
+After running experiments, automated scripts generate:
+- **Results table (part of AE)**: Formatted table matching Table 1 from the paper (with mean
+  ± std statistics)
+- **Log file**: Detailed execution trace which contains:
+   - **Parameter regions**: Partitions of the parameter space labeled as SAT (safe), UNSAT (unsafe), or INCONCLUSIVE
+   - **Control strategy**: Synthesized controllers for each safe region
+   - **Statistics**: SMT solver calls, refinement iterations, and timing information
+- **Parameter space figures (part of AE)**: PNG visualizations of
+  safe/unsafe/inconclusive regions (Figure 1)
 
-### Simplified Examples
+### Viewing Generated Figures
 
-#### 1D Reachability with Parameters
+The experiments generate PNG figure files inside the Docker container. To view these figures on your host machine, you need to copy them out of the container.
 
-```json
-{
-  "system": {
-    "type": "cartesian",
-    "state_vars": ["S1"],
-    "param_vars": ["P1"],
-    "noise_vars": ["W1"],
-    "control_vars": ["U1"],
-    "state_bounds": [[-2, 150]],
-    "param_bounds": [[-1.0, 1.0]],
-    "control_bounds": [[0, 0.6]],
-    "initial_region": {"bounds": [[2, 3]]},
-    "dynamics": [
-      {"condition": "-2 <= S1 <= 0", "transforms": {"S1": "(+ S1 0)"}},
-      {"condition": "0 <= S1 <= 100", "transforms": {"S1": "(+ S1 (+ U1 (+ W1 P1)))"}},
-      {"condition": "S1 >= 100", "transforms": {"S1": "(+ S1 0)"}}
-    ],
-    "noise_distribution": {"type": "uniform", "params": {"lower": [-0.75], "upper": [-0.25]}}
-  },
-  "target_region": {"bounds": [[90, 150]]},
-  "enable_param_refinement": true,
-  "param_refinement_threshold": 0.1,
-  "cutoff_time_per_smt_query": 10,
-  "parallel_refinement": true,
-  "target_probability": 0.9,
-  "degree": 1,
-  "smt_solver": "z3",
-  "entailment_solver": "farkas",
-  "output_smt_path": "./tmp/temporary_polyhorn_input.smt2"
-}
+**Step 1: Find your container ID**
+
+After running experiments, your container is still running (if you used `docker
+run -it`). Open a **new terminal** on your host machine and run (you may need `sudo`):
+
+```bash
+# List all running containers
+docker ps
 ```
 
-#### 1D Safety with Parameters
-
-```json
-{
-  "system": {
-    "type": "cartesian",
-    "state_vars": ["S1"],
-    "param_vars": ["P1"],
-    "noise_vars": ["W1"],
-    "control_vars": ["U1"],
-    "state_bounds": [[-2, 150]],
-    "param_bounds": [[0.0, 3.0]],
-    "control_bounds": [[-1, 1]],
-    "initial_region": {"bounds": [[2, 3]]},
-    "dynamics": [
-      {"condition": "-2 <= S1 <= 0", "transforms": {"S1": "(+ S1 0)"}},
-      {"condition": "0 <= S1 <= 100", "transforms": {"S1": "(+ S1 (+ U1 (+ W1 P1)))"}},
-      {"condition": "S1 >= 100", "transforms": {"S1": "(+ S1 0)"}}
-    ],
-    "noise_distribution": {"type": "uniform", "params": {"lower": [-1], "upper": [1]}}
-  },
-  "unsafe_region": {"bounds": [[90, 150]]},
-  "enable_param_refinement": true,
-  "param_refinement_threshold": 0.1,
-  "cutoff_time_per_smt_query": 10,
-  "target_probability": 0.95,
-  "degree": 1,
-  "smt_solver": "z3",
-  "entailment_solver": "farkas",
-  "output_smt_path": "./tmp/temporary_polyhorn_input.smt2"
-}
+This shows output like:
+```
+CONTAINER ID   IMAGE              COMMAND   CREATED          STATUS          NAMES
+a1b2c3d4e5f6   atva2026-artifact  "bash"    10 minutes ago   Up 10 minutes   eager_newton
 ```
 
-#### 2D System with Conjunctive Conditions
+The **CONTAINER ID** is the first column (e.g., `a1b2c3d4e5f6`). You can use either the full ID or just the first few characters.
 
-```json
-{
-  "system": {
-    "type": "cartesian",
-    "state_vars": ["S1", "S2"],
-    "param_vars": ["P1", "P2"],
-    "noise_vars": ["W1", "W2"],
-    "state_bounds": [[-2, 2], [-2, 2]],
-    "param_bounds": [[-1.0, 1.0], [-1.0, 1.0]],
-    "initial_region": {"bounds": [[-1.9, -1.8], [-1.9, -1.8]]},
-    "dynamics": [
-      {
-        "condition": "-2 <= S1 <= 2 and -2 <= S2 <= 2",
-        "transforms": {
-          "S1": "(+ (* -1 S1) (+ (* -2 S2) (+ P1 W1)))",
-          "S2": "(+ S1 (+ (* -1 S2) (+ P2 W2)))"
-        }
-      }
-    ],
-    "noise_distribution": {"type": "uniform", "params": {"lower": [-0.1, 0.0], "upper": [-0.1, 0.1]}}
-  },
-  "target_region": {"bounds": [[-0.1, 0.1], [-0.1, 0.1]]},
-  "target_probability": 0.9,
-  "degree": 1,
-  "smt_solver": "z3",
-  "entailment_solver": "farkas",
-  "output_smt_path": "./tmp/temporary_polyhorn_input.smt2"
-}
+If you already exited the container, use `docker ps -a` to see all containers (including stopped ones).
+
+**Step 2: Copy PNG files to your host machine**
+
+```bash
+# Copy all PNG files from smoke test results
+docker cp a1b2c3d4e5f6:/artifact/smoke_test_results ./smoke_test_results
+
+# Copy all PNG files from partial run
+docker cp a1b2c3d4e5f6:/artifact/partial_run_results ./partial_run_results
+
+# Copy all PNG files from full run
+docker cp a1b2c3d4e5f6:/artifact/full_run_results ./full_run_results
 ```
 
-## Output
+Replace `a1b2c3d4e5f6` with your actual container ID.
 
-The tool outputs:
+**Step 3: View the figures**
 
-1. **Angelic Winning Regions**: Parameter regions where a controller exists satisfying the specification
-2. **Demonic Winning Regions**: Parameter regions where no controller can satisfy the specification (the dual spec holds for all controllers)
-3. **Inconclusive Regions**: Regions that timed out during analysis
+The PNG files are now on your host machine. Open them with any image viewer:
+- **Linux**: `eog smoke_test_results/*.png` or `xdg-open smoke_test_results/experiment_1_LRW_1d_add_z3_smoke.png`
+- **macOS**: `open smoke_test_results/*.png`
+- **Windows**: Double-click the PNG files in File Explorer
 
-For each winning region, the tool provides:
-- Parameter bounds defining the region
-- Synthesized certificate (V function) and controller (C function) coefficients
+**Tip**: While still inside the container, you can list generated PNG files:
+```bash
+ls -la smoke_test_results/*.png
+ls -la partial_run_results/*.png
+ls -la full_run_results/*.png
+```
 
-## Theory
+## File Structure
 
-The tool uses:
-- **Ranking Supermartingales (RSM)** for reachability verification
-- **Repulsing Supermartingales (RASM)** for safety verification
-- **Farkas' Lemma** for polynomial constraint solving
-- **Parametric refinement** to partition the parameter space into winning regions
+```
+.
+├── Dockerfile                      # Docker image specification
+├── LICENSE                         # MIT License
+├── USER_MANUAL.md                  # Tool documentation (JSON format specification)
+├── README.md                       # This file (artifact evaluation instructions)
+├── requirements.txt                # Python dependencies
+├── download_dependencies.sh        # Script to refresh offline dependencies (optional, requires internet connection)
+├── run_smoke_test.sh               # Script for quick installation verification (<5 min)
+├── run_partial.sh                  # Partial run (~30-40 min)
+├── run_full.sh                     # Full run for Table 1 experiments
+├── offline_dependencies/           # Pre-downloaded dependencies (~150MB)
+│   ├── python-packages/            # Python wheel files
+│   ├── mathsat/                    # MathSAT solver tarball
+│   └── deb-packages/               # Debian packages for build-essential, libgmp-dev, vim
+├── src/
+│   └── param_synthesis.py          # Main synthesis tool
+├── scripts/
+│   ├── generate_results_table.py   # Generates formatted results table
+│   └── generate_figures.py         # Generates parameter space visualizations
+├── examples/
+│   └── stable/                     # Benchmark instances from Table 1
+│       ├── LRW_1d_add_z3.json
+│       ├── LRW_1d_add_mathsat.json
+│       ├── LRW_1d_mul_z3.json
+│       ├── LRW_1d_mul_mathsat.json
+│       ├── LRW_1d_add_mul_z3.json
+│       ├── LRW_1d_add_mul_mathsat.json
+│       ├── LRW_1d_add_z3_smoke.json         # Smoke test configs
+│       └── LRW_1d_add_mathsat_smoke.json
+├── smoke_test_results/             # Results from run_smoke_test.sh (created at runtime)
+├── partial_run_results/            # Results from run_partial.sh (created at runtime)
+├── full_run_results/               # Results from run_full.sh (created at runtime)
+└── tmp/                            # Temporary SMT files (created at runtime)
+```
 
-### Certificate Functions
+## Troubleshooting
 
-For a system with states X and parameters P:
-- **V(X, P)**: Lyapunov-like certificate function (polynomial over states and parameters)
-- **C(X, P)**: Controller function (polynomial over states and parameters)
-- **I(X)**: Invariant function (polynomial over states only)
+### Build Fails: Missing Offline Dependencies
 
-The degree of these polynomials is controlled by the `degree` parameter.
+**Problem**: Build fails with "No such file or directory" for `offline_dependencies/`
+
+**Solution**: Ensure you extracted the complete artifact ZIP file which includes this directory.
+
+### Build Fails: Corrupted Dependencies
+
+**Problem**: Build fails during MathSAT or Python package installation
+
+**Solutions** (choose one):
+
+1. **Re-download dependencies** (requires internet):
+   ```bash
+   ./download_dependencies.sh && docker build -t atva2026-artifact .
+   ```
+   Downloads all dependencies (~85MB): pip installer, Python wheels, MathSAT tarball, Ubuntu packages.
+
+   Requires: Internet access, `pip3`, `apt-get`
+
+2. **Use online build fallback** (requires internet):
+   ```bash
+   docker build -f Dockerfile.online -t atva2026-artifact .
+   ```
+   Downloads dependencies directly during build.
+
+3. **Run Z3-only benchmarks** (workaround):
+   ```bash
+   # Z3 is always available via system package
+   python3 src/param_synthesis.py examples/stable/LRW_1d_add_z3.json
+   python3 src/param_synthesis.py examples/stable/LRW_1d_mul_z3.json
+   python3 src/param_synthesis.py examples/stable/LRW_1d_add_mul_z3.json
+   ```
+   Or modify MathSAT JSON files: change `"smt_solver": "mathsat"` to `"smt_solver": "z3"`
+
+
+
+## Additional Documentation
+
+- **USER_MANUAL.md**: Detailed documentation of the tool, JSON configuration format, and implementation details
+
